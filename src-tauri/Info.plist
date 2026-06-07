@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Shown when the app first requests microphone access -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Vexa records your microphone to transcribe your meetings locally.</string>
+    <!-- System-audio capture uses ScreenCaptureKit, which is gated by the
+         "Screen & System Audio Recording" permission. macOS prompts for this
+         automatically the first time capture starts. -->
+    <key>NSCameraUsageDescription</key>
+    <string>Not used. Vexa only captures audio.</string>
+</dict>
+</plist>

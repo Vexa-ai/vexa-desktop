@@ -1,0 +1,47 @@
+[package]
+name = "granola"
+version = "0.1.0"
+description = "Open-source local meeting recorder + transcription (a Granola-style client for Vexa)"
+authors = ["Vexa"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix avoids a name clash with the bin target on Windows.
+name = "granola_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio capture (mic everywhere; loopback on Windows/Linux)
+cpal = "0.15"
+# WAV encode/decode
+hound = "3"
+# Local storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+# HTTP client for the transcription service (multipart upload)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+
+# macOS system-audio capture via ScreenCaptureKit (optional; enabled by the `sck` feature)
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "0.3", optional = true }
+core-media-rs = { version = "0.3", optional = true }
+
+[features]
+default = []
+# Enable native macOS system-audio capture (ScreenCaptureKit).
+sck = ["dep:screencapturekit", "dep:core-media-rs"]

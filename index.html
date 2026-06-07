@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vexa</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="brand-logo" src="/src/assets/vexa-logo.svg" alt="Vexa" />
+          <span>Vexa</span>
+        </div>
+        <button id="new-recording" class="record-btn">● Start recording</button>
+        <div class="sidebar-head">
+          <span>Sessions</span>
+          <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+        </div>
+        <ul id="session-list" class="session-list"></ul>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="session-title">No session selected</h1>
+            <div id="session-meta" class="meta"></div>
+          </div>
+          <div class="status">
+            <span id="rec-indicator" class="rec-indicator hidden">● REC</span>
+            <span id="timer" class="timer hidden">00:00</span>
+          </div>
+        </header>
+        <div class="consent">
+          Always get consent when transcribing others.
+          <span class="legend">
+            <span class="legend-item"><span class="swatch mic"></span>You (mic)</span>
+            <span class="legend-item"><span class="swatch system"></span>Others (system audio)</span>
+          </span>
+        </div>
+        <div id="status-banner" class="banner hidden"></div>
+        <section id="transcript" class="transcript">
+          <div class="empty">Start a recording or pick a past session to see its transcript.</div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Settings dialog -->
+    <div id="settings-overlay" class="overlay hidden">
+      <div class="dialog">
+        <h2>Settings</h2>
+        <label>Transcription endpoint URL
+          <input id="set-endpoint" type="text" placeholder="http://localhost:8083" />
+        </label>
+        <label>API token
+          <input id="set-token" type="password" placeholder="X-API-Key for the transcription service" />
+        </label>
+        <label>Language (blank = auto-detect)
+          <input id="set-language" type="text" placeholder="e.g. en, es, fr" />
+        </label>
+        <label class="check"><input id="set-mic" type="checkbox" /> Capture microphone</label>
+        <label class="check"><input id="set-system" type="checkbox" /> Capture system audio</label>
+        <div class="dialog-actions">
+          <button id="settings-cancel" class="ghost">Cancel</button>
+          <button id="settings-save" class="primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

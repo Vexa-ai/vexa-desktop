@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 // ---- Types mirroring the Rust side ----
 interface Settings {
@@ -8,6 +9,21 @@ interface Settings {
   language: string;
   capture_mic: boolean;
   capture_system: boolean;
+  vault_path: string;
+  claude_model: string;
+  claude_path: string;
+  max_budget_usd: number | null;
+}
+interface ChatRow { role: string; text: string; created_at: string }
+interface DeltaEvent { session: string; text: string }
+interface ToolEvent { session: string; name: string; file: string | null }
+interface ResultEvent { session: string; text: string; cost_usd: number | null }
+interface ClaudeErrEvent { session: string; message: string }
+interface VaultClaude {
+  vault: { path: string; exists: boolean; adopted: boolean; ready: boolean } | null;
+  claude_version: string | null;
+  claude_path: string | null;
+  claude_error: string | null;
 }
 interface SessionRow {
   id: string;
@@ -54,6 +70,9 @@ let recording = false;
 let viewSessionId: string | null = null; // session shown in the transcript pane
 let timerStart = 0;
 let timerHandle: number | undefined;
+let appSettings: Settings | null = null; // last-loaded settings (preserve on save)
+let streamingMsgEl: HTMLElement | null = null; // current streaming assistant bubble
+let claudeBusy = false;
 
 // ---- DOM helpers ----
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -225,6 +244,9 @@ async function selectSession(s: SessionRow) {
   const segs = dedupeLoaded(raw);
   clearTranscript(segs.length ? undefined : "No transcript for this session yet.");
   for (const seg of segs) appendSegment(seg);
+  setChatStatus("");
+  await loadChat(s.id);
+  setBusy(claudeBusy); // refresh Process button enabled state for the new session
   await refreshSessions();
 }
 
@@ -281,29 +303,168 @@ function stopTimer() {
   if (timerHandle) window.clearInterval(timerHandle);
 }
 
+// ---- Knowledge vault + Claude Code chat ----
+function clearChat(placeholder?: string) {
+  const c = $("chat");
+  c.innerHTML = placeholder ? `<div class="chat-empty">${placeholder}</div>` : "";
+  streamingMsgEl = null;
+}
+function addMsg(role: "user" | "assistant", text: string): HTMLElement {
+  const c = $("chat");
+  const empty = c.querySelector(".chat-empty");
+  if (empty) empty.remove();
+  const el = document.createElement("div");
+  el.className = `msg ${role}`;
+  el.textContent = text;
+  c.appendChild(el);
+  c.scrollTop = c.scrollHeight;
+  return el;
+}
+function addToolChip(name: string, file: string | null) {
+  const c = $("chat");
+  const empty = c.querySelector(".chat-empty");
+  if (empty) empty.remove();
+  const chip = document.createElement("div");
+  if (file) {
+    const rel = file.split("/").slice(-2).join("/");
+    chip.className = "tool-chip file";
+    chip.textContent = `✎ ${rel}`;
+    chip.title = file;
+    chip.onclick = () => openInObsidian(file);
+  } else {
+    chip.className = "tool-chip";
+    chip.textContent = `· ${name}`;
+  }
+  c.appendChild(chip);
+  c.scrollTop = c.scrollHeight;
+}
+function setChatStatus(text: string, kind: "" | "working" | "error" = "") {
+  const el = $("chat-status");
+  el.textContent = text;
+  el.className = `chat-status ${kind}`;
+  el.classList.toggle("hidden", !text);
+}
+function setBusy(b: boolean) {
+  claudeBusy = b;
+  ($("process-btn") as HTMLButtonElement).disabled = b || !viewSessionId;
+  ($("chat-send") as HTMLButtonElement).disabled = b;
+}
+async function openInObsidian(file: string) {
+  try {
+    await invoke("open_in_obsidian", { file });
+  } catch (e) {
+    setChatStatus(`Couldn't open in Obsidian: ${e}`, "error");
+  }
+}
+async function loadChat(sessionId: string) {
+  try {
+    const rows = await invoke<ChatRow[]>("get_chat", { id: sessionId });
+    if (!rows.length) {
+      clearChat("No assistant activity yet. “Process meeting” or ask a question.");
+      return;
+    }
+    clearChat();
+    for (const r of rows) addMsg(r.role === "user" ? "user" : "assistant", r.text);
+  } catch {
+    clearChat();
+  }
+}
+async function processMeeting() {
+  if (!viewSessionId || claudeBusy) return;
+  setBusy(true);
+  streamingMsgEl = null;
+  setChatStatus("Processing meeting into your vault…", "working");
+  try {
+    await invoke("process_meeting", { sessionId: viewSessionId });
+  } catch (e) {
+    setBusy(false);
+    setChatStatus(`${e}`, "error");
+  }
+}
+async function sendChat() {
+  const ta = $("chat-text") as HTMLTextAreaElement;
+  const text = ta.value.trim();
+  if (!text || claudeBusy || !viewSessionId) return;
+  addMsg("user", text);
+  ta.value = "";
+  setBusy(true);
+  streamingMsgEl = null;
+  setChatStatus("Working…", "working");
+  try {
+    await invoke("chat_send", { sessionId: viewSessionId, message: text });
+  } catch (e) {
+    setBusy(false);
+    setChatStatus(`${e}`, "error");
+  }
+}
+async function refreshVaultUI() {
+  const vc = await invoke<VaultClaude>("get_vault_status");
+  ($("set-vault") as HTMLInputElement).value = vc.vault?.path ?? appSettings?.vault_path ?? "";
+  const vs = $("vault-status");
+  if (vc.vault?.ready) {
+    vs.textContent = `Vault ready (${vc.vault.adopted ? "adopted existing graph" : "scaffolded"}).`;
+    vs.className = "hint ok";
+  } else if (vc.vault) {
+    vs.textContent = "Folder set but not initialized — click Choose to (re)scaffold.";
+    vs.className = "hint";
+  } else {
+    vs.textContent = "Pick a folder for your knowledge graph (then open it in Obsidian).";
+    vs.className = "hint";
+  }
+  const cs = $("claude-status");
+  if (vc.claude_version) {
+    cs.textContent = `Claude Code detected: ${vc.claude_version}`;
+    cs.className = "hint ok";
+  } else {
+    cs.textContent = vc.claude_error ?? "Claude Code not found.";
+    cs.className = "hint error";
+  }
+}
+async function chooseVault() {
+  const dir = await openDialog({ directory: true, multiple: false, title: "Choose knowledge folder" });
+  if (!dir || typeof dir !== "string") return;
+  try {
+    await invoke("setup_vault", { path: dir });
+    if (appSettings) appSettings.vault_path = dir;
+    ($("set-vault") as HTMLInputElement).value = dir;
+    await refreshVaultUI();
+  } catch (e) {
+    $("vault-status").textContent = `${e}`;
+    $("vault-status").className = "hint error";
+  }
+}
+
 // ---- Settings ----
 async function openSettings() {
   const s = await invoke<Settings>("get_settings");
+  appSettings = s;
   ($("set-endpoint") as HTMLInputElement).value = s.endpoint_url;
   ($("set-token") as HTMLInputElement).value = s.api_token;
   ($("set-language") as HTMLInputElement).value = s.language;
   ($("set-mic") as HTMLInputElement).checked = s.capture_mic;
   ($("set-system") as HTMLInputElement).checked = s.capture_system;
+  ($("set-model") as HTMLSelectElement).value = s.claude_model || "sonnet";
+  ($("set-vault") as HTMLInputElement).value = s.vault_path;
   $("settings-overlay").classList.remove("hidden");
+  refreshVaultUI();
 }
 function closeSettings() {
   $("settings-overlay").classList.add("hidden");
 }
 async function saveSettings() {
+  const base = appSettings ?? (await invoke<Settings>("get_settings"));
   const newSettings: Settings = {
+    ...base,
     endpoint_url: ($("set-endpoint") as HTMLInputElement).value.trim(),
     api_token: ($("set-token") as HTMLInputElement).value.trim(),
     language: ($("set-language") as HTMLInputElement).value.trim(),
     capture_mic: ($("set-mic") as HTMLInputElement).checked,
     capture_system: ($("set-system") as HTMLInputElement).checked,
+    claude_model: ($("set-model") as HTMLSelectElement).value,
   };
   try {
     await invoke("save_settings", { newSettings });
+    appSettings = newSettings;
     closeSettings();
     banner("Settings saved.", "info");
     setTimeout(() => banner(""), 2000);
@@ -330,6 +491,34 @@ async function setupEvents() {
   await listen<ErrorEvent>("transcript-error", (e) => {
     banner(`Transcription issue: ${e.payload.message}`, "error");
   });
+
+  // Claude Code streaming.
+  await listen<DeltaEvent>("claude-delta", (e) => {
+    if (e.payload.session !== viewSessionId) return;
+    if (!streamingMsgEl) streamingMsgEl = addMsg("assistant", "");
+    streamingMsgEl.textContent = (streamingMsgEl.textContent || "") + e.payload.text;
+    $("chat").scrollTop = $("chat").scrollHeight;
+  });
+  await listen<ToolEvent>("claude-tool", (e) => {
+    if (e.payload.session !== viewSessionId) return;
+    addToolChip(e.payload.name, e.payload.file);
+    streamingMsgEl = null; // a tool call breaks the current text bubble
+  });
+  await listen<ResultEvent>("claude-result", (e) => {
+    if (e.payload.session !== viewSessionId) return;
+    if (!streamingMsgEl && e.payload.text) addMsg("assistant", e.payload.text);
+    streamingMsgEl = null;
+    setBusy(false);
+    const cost = e.payload.cost_usd != null ? ` · $${e.payload.cost_usd.toFixed(3)}` : "";
+    setChatStatus(`Done${cost}.`, "");
+    setTimeout(() => setChatStatus(""), 4000);
+  });
+  await listen<ClaudeErrEvent>("claude-error", (e) => {
+    if (e.payload.session !== viewSessionId) return;
+    streamingMsgEl = null;
+    setBusy(false);
+    setChatStatus(`Claude error: ${e.payload.message}`, "error");
+  });
 }
 
 function wireUI() {
@@ -337,6 +526,16 @@ function wireUI() {
   $("settings-btn").onclick = openSettings;
   $("settings-cancel").onclick = closeSettings;
   $("settings-save").onclick = saveSettings;
+  $("process-btn").onclick = processMeeting;
+  $("chat-send").onclick = sendChat;
+  $("vault-choose").onclick = chooseVault;
+  ($("chat-text") as HTMLTextAreaElement).addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      sendChat();
+    }
+  });
+  ($("process-btn") as HTMLButtonElement).disabled = true; // until a session is selected
 }
 
 window.addEventListener("DOMContentLoaded", async () => {

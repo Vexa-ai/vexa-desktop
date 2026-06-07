@@ -49,7 +49,8 @@ fn init(conn: &Connection) -> Result<()> {
             started_at   TEXT NOT NULL,
             ended_at     TEXT,
             duration_secs REAL,
-            audio_path   TEXT NOT NULL
+            audio_path   TEXT NOT NULL,
+            claude_session_id TEXT
         );
         CREATE TABLE IF NOT EXISTS segments (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,13 +63,22 @@ fn init(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id, start);
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            role       TEXT NOT NULL,
+            text       TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);
         "#,
     )?;
-    // Migrate older databases that predate the `source` column.
+    // Migrate older databases that predate later columns.
     let _ = conn.execute(
         "ALTER TABLE segments ADD COLUMN source TEXT NOT NULL DEFAULT 'mic'",
         [],
     );
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
     Ok(())
 }
 
@@ -173,4 +183,63 @@ pub fn get_segments(conn: &Connection, session_id: &str) -> Result<Vec<SegmentRo
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+// ---- Chat (Claude Code) ----
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatRow {
+    pub role: String,
+    pub text: String,
+    pub created_at: String,
+}
+
+pub fn insert_chat(
+    conn: &Connection,
+    session_id: &str,
+    role: &str,
+    text: &str,
+    created_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![session_id, role, text, created_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_chat(conn: &Connection, session_id: &str) -> Result<Vec<ChatRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, text, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map([session_id], |r| {
+            Ok(ChatRow {
+                role: r.get(0)?,
+                text: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn set_claude_session(conn: &Connection, session_id: &str, claude_sid: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET claude_session_id = ?2 WHERE id = ?1",
+        rusqlite::params![session_id, claude_sid],
+    )?;
+    Ok(())
+}
+
+pub fn get_claude_session(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    let sid: Option<String> = conn
+        .query_row(
+            "SELECT claude_session_id FROM sessions WHERE id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    Ok(sid)
 }

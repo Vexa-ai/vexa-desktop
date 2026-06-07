@@ -33,17 +33,36 @@
             <span id="timer" class="timer hidden">00:00</span>
           </div>
         </header>
-        <div class="consent">
-          Always get consent when transcribing others.
-          <span class="legend">
-            <span class="legend-item"><span class="swatch mic"></span>You (mic)</span>
-            <span class="legend-item"><span class="swatch system"></span>Others (system audio)</span>
-          </span>
-        </div>
         <div id="status-banner" class="banner hidden"></div>
-        <section id="transcript" class="transcript">
-          <div class="empty">Start a recording or pick a past session to see its transcript.</div>
-        </section>
+        <div class="work">
+          <section class="transcript-col">
+            <div class="consent">
+              Always get consent when transcribing others.
+              <span class="legend">
+                <span class="legend-item"><span class="swatch mic"></span>You (mic)</span>
+                <span class="legend-item"><span class="swatch system"></span>Others (system audio)</span>
+              </span>
+            </div>
+            <section id="transcript" class="transcript">
+              <div class="empty">Start a recording or pick a past session to see its transcript.</div>
+            </section>
+          </section>
+
+          <section class="chat-col">
+            <div class="chat-head">
+              <span class="chat-title">Assistant</span>
+              <button id="process-btn" class="primary-sm" title="Turn this meeting into entities + a report in your vault">✦ Process meeting</button>
+            </div>
+            <div id="chat-status" class="chat-status hidden"></div>
+            <div id="chat" class="chat">
+              <div class="chat-empty">Set up a knowledge folder in ⚙, then “Process meeting” or ask anything — Claude Code works in your Obsidian vault.</div>
+            </div>
+            <div class="chat-input">
+              <textarea id="chat-text" rows="2" placeholder="Ask about this meeting, or tell Claude what to do in your vault…"></textarea>
+              <button id="chat-send" class="primary-sm">Send</button>
+            </div>
+          </section>
+        </div>
       </main>
     </div>
 
@@ -62,6 +81,23 @@
         </label>
         <label class="check"><input id="set-mic" type="checkbox" /> Capture microphone</label>
         <label class="check"><input id="set-system" type="checkbox" /> Capture system audio</label>
+
+        <hr class="sep" />
+        <h3 class="subhead">Knowledge folder (Obsidian vault)</h3>
+        <div class="vault-row">
+          <input id="set-vault" type="text" placeholder="No folder set" readonly />
+          <button id="vault-choose" class="ghost">Choose…</button>
+        </div>
+        <div id="vault-status" class="hint"></div>
+        <label>Claude model
+          <select id="set-model">
+            <option value="sonnet">sonnet (fast, cheap)</option>
+            <option value="opus">opus (richer)</option>
+            <option value="haiku">haiku (fastest)</option>
+          </select>
+        </label>
+        <div id="claude-status" class="hint"></div>
+
         <div class="dialog-actions">
           <button id="settings-cancel" class="ghost">Cancel</button>
           <button id="settings-save" class="primary">Save</button>

@@ -18,6 +18,16 @@ pub struct Settings {
     pub capture_mic: bool,
     /// Capture system audio (loopback / ScreenCaptureKit).
     pub capture_system: bool,
+
+    // ---- Knowledge vault + Claude Code ----
+    /// Path to the knowledge vault (Obsidian folder). Empty = not set up.
+    pub vault_path: String,
+    /// Claude model alias for processing/chat (e.g. "sonnet", "opus").
+    pub claude_model: String,
+    /// Explicit path to the `claude` binary. Empty = auto-detect.
+    pub claude_path: String,
+    /// Optional per-run spend cap passed to `claude --max-budget-usd`.
+    pub max_budget_usd: Option<f64>,
 }
 
 impl Default for Settings {
@@ -28,6 +38,10 @@ impl Default for Settings {
             language: String::new(),
             capture_mic: true,
             capture_system: true,
+            vault_path: String::new(),
+            claude_model: "sonnet".to_string(),
+            claude_path: String::new(),
+            max_budget_usd: None,
         }
     }
 }

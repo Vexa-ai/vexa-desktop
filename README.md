@@ -78,3 +78,17 @@ client, SQLite + WAV persistence, live transcript UI, session history, settings.
 
 Not yet: per-speaker diarization, in-app audio playback synced to transcript,
 AI summaries/notes, in-app permission pre-flight UI.
+
+## License
+
+Licensed under either of **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache-2.0**
+([LICENSE-APACHE](LICENSE-APACHE)) at your option.
+
+All dependencies are permissively licensed (MIT / Apache-2.0 / BSD / ISC).
+A few transitive crates pulled in by Tauri use **MPL-2.0** (`cssparser`,
+`selectors`, `dtoa-short`, `option-ext`) — weak, file-level copyleft that does
+not affect this project's license — plus permissive **Unicode-3.0** (ICU) and
+**CDLA-Permissive-2.0** (CA-cert data) licenses. No GPL/AGPL/LGPL-only or
+proprietary dependencies. The editor is [Milkdown](https://milkdown.dev) (MIT,
+ProseMirror-based).
+

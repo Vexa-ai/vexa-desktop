@@ -62,6 +62,8 @@ pub fn setup(root: &Path) -> Result<VaultStatus> {
     write_if_absent(&root.join("templates/strategy.md"), TPL_STRATEGY)?;
     write_if_absent(&root.join("templates/report.md"), TPL_REPORT)?;
     write_if_absent(&root.join("CLAUDE.md"), CLAUDE_MD)?;
+    write_if_absent(&root.join("agent.md"), AGENT_MD)?;
+    write_if_absent(&root.join("story.md"), STORY_MD)?;
     write_if_absent(&root.join("README.md"), README_MD)?;
     write_if_absent(&root.join(".vexa/prompts/process-meeting.md"), PROMPT_PROCESS)?;
 
@@ -71,6 +73,28 @@ pub fn setup(root: &Path) -> Result<VaultStatus> {
         adopted,
         ready: root.join("CLAUDE.md").is_file(),
     })
+}
+
+/// Ensure `agent.md` exists (older vaults predate it); return its contents.
+pub fn ensure_agent_md(root: &Path) -> Option<String> {
+    let p = root.join("agent.md");
+    if !p.exists() {
+        let _ = std::fs::write(&p, AGENT_MD);
+    }
+    std::fs::read_to_string(&p)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Ensure `story.md` exists; return its contents (the running-story agent brain).
+pub fn ensure_story_md(root: &Path) -> Option<String> {
+    let p = root.join("story.md");
+    if !p.exists() {
+        let _ = std::fs::write(&p, STORY_MD);
+    }
+    std::fs::read_to_string(&p)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 pub fn status(root: &Path) -> VaultStatus {
@@ -121,24 +145,12 @@ fn similar(a: &str, b: &str) -> bool {
 /// Write a labeled transcript to `.vexa/transcripts/<id>.md`. Mic segments that
 /// merely echo a near-simultaneous system segment (speaker-bleed) are dropped,
 /// matching the UI dedup, so Claude sees one clean stream.
-pub fn write_transcript(
-    root: &Path,
-    session_id: &str,
-    title: &str,
-    started_at: &str,
-    segments: &[SegmentRow],
-) -> Result<PathBuf> {
+/// Attributed, echo-deduped transcript lines (`[mm:ss] Me|Others: text`).
+fn attributed_lines(segments: &[SegmentRow]) -> String {
     let mut segs: Vec<&SegmentRow> = segments.iter().collect();
     segs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut body = String::new();
-    body.push_str(&format!("# Transcript — {title}\n\n"));
-    body.push_str(&format!("- Session: `{session_id}`\n"));
-    body.push_str(&format!("- Started: {started_at}\n\n"));
-    body.push_str("Speakers: **Me** = your microphone, **Others** = system audio (call/video).\n\n");
-
+    let mut out = String::new();
     for (i, seg) in segs.iter().enumerate() {
-        // Drop mic echoes of system audio.
         if seg.source == "mic" {
             let echo = segs.iter().enumerate().any(|(j, o)| {
                 j != i
@@ -151,8 +163,24 @@ pub fn write_transcript(
             }
         }
         let who = if seg.source == "system" { "Others" } else { "Me" };
-        body.push_str(&format!("[{}] {}: {}\n", fmt_ts(seg.start), who, seg.text.trim()));
+        out.push_str(&format!("[{}] {}: {}\n", fmt_ts(seg.start), who, seg.text.trim()));
     }
+    out
+}
+
+pub fn write_transcript(
+    root: &Path,
+    session_id: &str,
+    title: &str,
+    started_at: &str,
+    segments: &[SegmentRow],
+) -> Result<PathBuf> {
+    let mut body = String::new();
+    body.push_str(&format!("# Transcript — {title}\n\n"));
+    body.push_str(&format!("- Session: `{session_id}`\n"));
+    body.push_str(&format!("- Started: {started_at}\n\n"));
+    body.push_str("Speakers: **Me** = your microphone, **Others** = system audio (call/video).\n\n");
+    body.push_str(&attributed_lines(segments));
 
     let path = root.join(".vexa/transcripts").join(format!("{session_id}.md"));
     if let Some(parent) = path.parent() {
@@ -160,6 +188,119 @@ pub fn write_transcript(
     }
     std::fs::write(&path, body).with_context(|| format!("write transcript {}", path.display()))?;
     Ok(path)
+}
+
+/// Attributed transcript text for a set of segments (used inline in story prompts).
+pub fn attributed(segments: &[SegmentRow]) -> String {
+    attributed_lines(segments)
+}
+
+// ---------------------------------------------------------------------------
+// In-app notes browser: file tree + read/write, all confined to the vault.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct Node {
+    pub name: String,
+    pub path: String,
+    pub dir: bool,
+    pub children: Vec<Node>,
+}
+
+/// Build the markdown file tree under `root` (skips dotfiles like `.vexa`).
+pub fn tree(root: &Path) -> Vec<Node> {
+    build_tree(root)
+}
+
+fn build_tree(dir: &Path) -> Vec<Node> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // .vexa, .git, .obsidian, .gitkeep …
+        }
+        let p = entry.path();
+        if p.is_dir() {
+            out.push(Node {
+                name,
+                path: p.to_string_lossy().to_string(),
+                dir: true,
+                children: build_tree(&p),
+            });
+        } else if name.ends_with(".md") {
+            out.push(Node {
+                name,
+                path: p.to_string_lossy().to_string(),
+                dir: false,
+                children: Vec::new(),
+            });
+        }
+    }
+    // Folders first, then alphabetical.
+    out.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out
+}
+
+/// Resolve `path` against `root`, guaranteeing it stays inside the vault.
+fn confined(root: &Path, path: &Path) -> Result<PathBuf> {
+    let canon_root = root
+        .canonicalize()
+        .with_context(|| format!("vault not found: {}", root.display()))?;
+    let canon = if path.exists() {
+        path.canonicalize()?
+    } else {
+        let parent = path.parent().ok_or_else(|| anyhow::anyhow!("invalid path"))?;
+        let file = path.file_name().ok_or_else(|| anyhow::anyhow!("invalid path"))?;
+        parent.canonicalize()?.join(file)
+    };
+    if !canon.starts_with(&canon_root) {
+        anyhow::bail!("path escapes the vault");
+    }
+    Ok(canon)
+}
+
+pub fn read_note(root: &Path, path: &Path) -> Result<String> {
+    let p = confined(root, path)?;
+    std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))
+}
+
+pub fn write_note(root: &Path, path: &Path, content: &str) -> Result<()> {
+    let p = confined(root, path)?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&p, content).with_context(|| format!("write {}", p.display()))
+}
+
+/// Find `<name>.md` anywhere under the vault (for `[[wikilink]]` navigation).
+pub fn resolve_link(root: &Path, name: &str) -> Option<PathBuf> {
+    let target = format!("{}.md", name.trim().to_lowercase());
+    fn walk(dir: &Path, target: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(found) = walk(&p, target) {
+                    return Some(found);
+                }
+            } else if name.to_lowercase() == target {
+                return Some(p);
+            }
+        }
+        None
+    }
+    walk(root, &target)
 }
 
 /// `obsidian://open?path=<url-encoded absolute path>` deep link.
@@ -343,6 +484,74 @@ these rules exactly when processing meeting transcripts.
 
 Keep edits minimal, factual, and sourced to the meeting. When unsure, prefer a
 brief note over speculation.
+"#;
+
+const AGENT_MD: &str = r#"# Vexa meeting agent
+
+You are a **live meeting copilot**. You run repeatedly **during** a meeting; each
+run you get the transcript so far. Be extremely concise and proactive — surface
+what's useful right now and offer one-click next steps. You can read/write the
+Obsidian vault you run in (follow CLAUDE.md for any writes).
+
+## Output contract (every run)
+1. A **Now** heading followed by **1–3 short bullets**: what's being discussed and
+   the single most useful thing this moment. No preamble, no recap.
+2. Then 2–5 one-click actions as a fenced block tagged `actions`, one per line as
+   `emoji short-label | full instruction to execute when clicked`:
+
+```actions
+🔎 Research JEPA | Research Yann LeCun's JEPA and VJEPA; create entities/products/JEPA.md with a 3-line summary and key links.
+👤 Stub speaker | Create entities/people/Speaker.md as an unnamed contact with a note to fill the name in when known.
+✅ Capture claim | Append the key claim just made to today's report under Decisions.
+```
+
+Keep labels SHORT (2–4 words). Put ALL detail in the instruction after `|`, never
+in the label. Use real names/claims from the transcript. Prefer: research an
+entity/claim mentioned, stub a person/company/product, capture a decision or to-do.
+
+## Rules
+- Terse. The body is bullets only; the actions are the buttons.
+- A plain **Update** is read-only thinking + suggested actions. Only write files
+  when an action is clicked.
+- When an action instruction is sent to you, execute it concisely and reply in ONE
+  line with a `[[wikilink]]` to any note you touched.
+
+Edit this file to change the agent — it's read fresh on every run.
+"#;
+
+const STORY_MD: &str = r#"# Story agent — living meeting report
+
+You maintain ONE living **meeting report** that grows during the meeting. Each run
+you get:
+1. The report file so far (read it).
+2. Only the NEW transcript since the last update — a sliding window, attributed
+   ("Me" = the user's mic, "Others" = system audio / the call).
+
+Your job: **extend** the report with a concise, faithful, **attributed**
+representation of the new content. You decide what to add or revise:
+- Append as the discussion continues. Correct earlier lines only if the new
+  transcript clarifies/changes them — don't rewrite the whole thing.
+- **Attribute**: make clear who said what (Me / Others, or a real name once
+  identified). This is a condensed *record*, not an abstract summary — keep the
+  substance, specifics, numbers, claims, decisions.
+- Be concise: tighten rambling into clear lines, but stay faithful to what was
+  actually said. No invented content.
+- Wrap notable entities (people, companies, products) in `[[wikilinks]]`.
+- Structure for scanning: short bullets / short lines under light headings. Group
+  by topic as it unfolds. Never a wall of text.
+
+Edit the report file in place. Reply with ONE short line on what you added.
+
+Suggested shape (adapt freely):
+```
+# <Meeting title> — live report
+
+**Participants:** Me, Others ([[names once known]])
+
+## <Topic as it comes up>
+- **Others:** <attributed point / quote, concise> ([[Entity]])
+- **Me:** <attributed point>
+```
 "#;
 
 const PROMPT_PROCESS: &str = r#"Process the meeting transcript at: {{transcript}}

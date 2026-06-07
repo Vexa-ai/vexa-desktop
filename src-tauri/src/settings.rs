@@ -28,6 +28,12 @@ pub struct Settings {
     pub claude_path: String,
     /// Optional per-run spend cap passed to `claude --max-budget-usd`.
     pub max_budget_usd: Option<f64>,
+
+    // ---- Screen frames (for speaker naming / diarization fusion) ----
+    /// Capture periodic screen frames while recording.
+    pub capture_frames: bool,
+    /// Seconds between captured frames.
+    pub frame_interval_secs: u64,
 }
 
 impl Default for Settings {
@@ -42,6 +48,8 @@ impl Default for Settings {
             claude_model: "sonnet".to_string(),
             claude_path: String::new(),
             max_budget_usd: None,
+            capture_frames: true,
+            frame_interval_secs: 5,
         }
     }
 }

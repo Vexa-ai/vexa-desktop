@@ -15,9 +15,13 @@
           <span>Vexa</span>
         </div>
         <button id="new-recording" class="record-btn">● Start recording</button>
+        <button id="open-notes" class="notes-btn">📁 Notes vault</button>
         <div class="sidebar-head">
           <span>Sessions</span>
-          <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+          <span class="head-btns">
+            <button id="theme-btn" class="icon-btn" title="Toggle night mode">🌙</button>
+            <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+          </span>
         </div>
         <ul id="session-list" class="session-list"></ul>
       </aside>
@@ -36,22 +40,40 @@
         <div id="status-banner" class="banner hidden"></div>
         <div class="work">
           <section class="transcript-col">
-            <div class="consent">
-              Always get consent when transcribing others.
-              <span class="legend">
-                <span class="legend-item"><span class="swatch mic"></span>You (mic)</span>
-                <span class="legend-item"><span class="swatch system"></span>Others (system audio)</span>
-              </span>
+            <div class="view-tabs">
+              <button id="tab-transcript" class="view-tab active">Transcript</button>
+              <button id="tab-story" class="view-tab">Story <span id="story-live" class="live-dot hidden"></span></button>
             </div>
-            <section id="transcript" class="transcript">
-              <div class="empty">Start a recording or pick a past session to see its transcript.</div>
-            </section>
+            <div id="transcript-pane" class="pane">
+              <div class="consent">
+                Always get consent when transcribing others.
+                <span class="legend">
+                  <span class="legend-item"><span class="swatch mic"></span>You (mic)</span>
+                  <span class="legend-item"><span class="swatch system"></span>Others (system audio)</span>
+                </span>
+              </div>
+              <section id="transcript" class="transcript">
+                <div class="empty">Start a recording or pick a past session to see its transcript.</div>
+              </section>
+            </div>
+            <div id="story-pane" class="pane hidden">
+              <div class="story-head">
+                <span id="story-status" class="story-status">Auto-updates while recording (fast model).</span>
+                <button id="story-refresh" class="ghost-sm">↻ Refresh</button>
+              </div>
+              <div id="story-body" class="story-body markdown">
+                <div class="empty">The live story builds itself here while you record. Entities are clickable.</div>
+              </div>
+            </div>
           </section>
 
           <section class="chat-col">
             <div class="chat-head">
               <span class="chat-title">Assistant</span>
-              <button id="process-btn" class="primary-sm" title="Turn this meeting into entities + a report in your vault">✦ Process meeting</button>
+              <div class="chat-head-actions">
+                <button id="update-btn" class="primary-sm" title="Live, proactive meeting note + hot actions (reads agent.md)">⟳ Update</button>
+                <button id="process-btn" class="ghost-sm" title="Write the full knowledge graph: entities + a report">✦ Process</button>
+              </div>
             </div>
             <div id="chat-status" class="chat-status hidden"></div>
             <div id="chat" class="chat">
@@ -64,6 +86,31 @@
           </section>
         </div>
       </main>
+    </div>
+
+    <!-- Notes vault workspace -->
+    <div id="vault-view" class="vault-view hidden">
+      <aside class="vault-tree-col">
+        <div class="vault-tree-head">
+          <span class="brand"><img class="brand-logo" src="/src/assets/vexa-logo.svg" alt="" /> Notes</span>
+          <button id="vault-close" class="icon-btn" title="Back to meetings">✕</button>
+        </div>
+        <div id="vault-tree" class="vault-tree"></div>
+      </aside>
+      <section class="note-col">
+        <div class="note-head">
+          <span id="note-path" class="note-path">Select a note from the tree</span>
+          <div class="note-actions">
+            <button id="note-edit" class="ghost-sm hidden">Edit</button>
+            <button id="note-save" class="primary-sm hidden">Save</button>
+            <button id="note-obsidian" class="ghost-sm hidden" title="Open in Obsidian (optional)">Obsidian</button>
+          </div>
+        </div>
+        <div id="note-preview" class="note-preview markdown">
+          <div class="empty">Pick a note on the left, or click a file chip in a meeting’s chat.</div>
+        </div>
+        <div id="note-editor" class="note-editor hidden"></div>
+      </section>
     </div>
 
     <!-- Settings dialog -->
@@ -81,6 +128,7 @@
         </label>
         <label class="check"><input id="set-mic" type="checkbox" /> Capture microphone</label>
         <label class="check"><input id="set-system" type="checkbox" /> Capture system audio</label>
+        <label class="check"><input id="set-frames" type="checkbox" /> Capture screen frames (for speaker naming)</label>
 
         <hr class="sep" />
         <h3 class="subhead">Knowledge folder (Obsidian vault)</h3>

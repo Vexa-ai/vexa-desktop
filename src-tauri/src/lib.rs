@@ -8,6 +8,7 @@
 mod audio;
 mod chunker;
 mod claude;
+mod frames;
 mod recorder;
 mod settings;
 mod storage;
@@ -164,6 +165,185 @@ fn setup_vault(state: State<AppState>, path: String) -> Result<VaultStatus, Stri
     Ok(status)
 }
 
+/// The agent's editable brain, read fresh each run (self-heals if missing).
+fn read_agent_md(vault: &Path) -> Option<String> {
+    vault::ensure_agent_md(vault)
+}
+
+#[derive(Serialize)]
+struct StoryRef {
+    /// Absolute path to the living report file (for the UI to read/open).
+    report_path: String,
+    /// Max segment end-time incorporated so far (the next window's `since`).
+    processed_until: f64,
+    /// Whether new content existed and an update was actually launched.
+    ran: bool,
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let t = out.trim_matches('-').to_string();
+    if t.is_empty() { "meeting".into() } else { t }
+}
+
+/// Incrementally extend the living meeting report from the transcript window
+/// after `since_secs`. The agent (fast model) reads the report + the new window
+/// and edits the report in place. Routed to the Story tab via the "story" kind.
+#[tauri::command]
+fn story_update(
+    app: AppHandle,
+    state: State<AppState>,
+    session_id: String,
+    since_secs: f64,
+) -> Result<StoryRef, String> {
+    let s = state.settings.lock().clone();
+    if s.vault_path.is_empty() {
+        return Err("Set up a knowledge folder in Settings first.".into());
+    }
+    let vault_path = PathBuf::from(&s.vault_path);
+    let info = claude::detect(opt(&s.claude_path)).map_err(|e| e.to_string())?;
+
+    let conn = state.db()?;
+    let session = storage::list_sessions(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|x| x.id == session_id)
+        .ok_or_else(|| "session not found".to_string())?;
+    let segments = storage::get_segments(&conn, &session_id).map_err(|e| e.to_string())?;
+
+    let processed_until = segments.iter().map(|g| g.end).fold(since_secs, f64::max);
+    let window: Vec<storage::SegmentRow> = segments
+        .into_iter()
+        .filter(|g| g.end > since_secs + 0.01)
+        .collect();
+
+    let slug = slugify(&session.title);
+    let report_rel = format!("reports/{slug}.md");
+    let report_abs = vault_path.join(&report_rel);
+    let report_path = report_abs.to_string_lossy().to_string();
+
+    if window.is_empty() {
+        return Ok(StoryRef {
+            report_path,
+            processed_until,
+            ran: false,
+        });
+    }
+
+    // Pass the current report + only the new window INLINE; the model returns the
+    // full updated report as text (far more reliable than haiku editing a file).
+    let existing = std::fs::read_to_string(&report_abs).unwrap_or_default();
+    let window_text = vault::attributed(&window);
+    let existing_block = if existing.trim().is_empty() {
+        "(no report yet — start a new one)".to_string()
+    } else {
+        existing
+    };
+    let prompt = format!(
+        "# Current report\n\n{existing_block}\n\n\
+         # New transcript window (attributed: Me = the user's mic, Others = system audio)\n\n\
+         {window_text}\n\n\
+         # Task\nReturn the FULL updated meeting report, extending it with the NEW window per \
+         your instructions (concise, attributed, [[wikilinks]]). Output ONLY the report \
+         markdown — no preamble, no code fences."
+    );
+    let _ = report_rel; // path is for the UI to persist/open
+    let story_md = vault::ensure_story_md(&vault_path);
+
+    claude::spawn_run(
+        app,
+        claude::RunOpts {
+            claude_path: info.path,
+            vault: vault_path,
+            db_path: state.db_path.clone(),
+            app_session: session_id,
+            prompt,
+            model: "haiku".into(),
+            resume_sid: None,
+            max_budget: s.max_budget_usd,
+            append_system: story_md,
+            kind: "story".into(),
+            persist: false,
+        },
+    );
+    Ok(StoryRef {
+        report_path,
+        processed_until,
+        ran: true,
+    })
+}
+
+/// Live, concise in-meeting copilot pass (the "Update" button). Reads the
+/// transcript so far and runs the agent (agent.md persona) for an actionable note.
+#[tauri::command]
+fn update_meeting(app: AppHandle, state: State<AppState>, session_id: String) -> Result<(), String> {
+    let s = state.settings.lock().clone();
+    if s.vault_path.is_empty() {
+        return Err("Set up a knowledge folder in Settings first.".into());
+    }
+    let vault_path = PathBuf::from(&s.vault_path);
+    let info = claude::detect(opt(&s.claude_path)).map_err(|e| e.to_string())?;
+
+    let conn = state.db()?;
+    let session = storage::list_sessions(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|x| x.id == session_id)
+        .ok_or_else(|| "session not found".to_string())?;
+    let segments = storage::get_segments(&conn, &session_id).map_err(|e| e.to_string())?;
+    if segments.is_empty() {
+        return Err("No transcript yet to update on.".into());
+    }
+    let tpath = vault::write_transcript(
+        &vault_path,
+        &session_id,
+        &session.title,
+        &session.started_at,
+        &segments,
+    )
+    .map_err(|e| e.to_string())?;
+    let rel = tpath
+        .strip_prefix(&vault_path)
+        .unwrap_or(&tpath)
+        .to_string_lossy()
+        .to_string();
+    let prompt = format!(
+        "LIVE MEETING UPDATE. The meeting-so-far transcript is at {rel}. Follow your \
+         agent instructions: give a concise, proactive in-meeting note with hot actions. \
+         Read-only unless an action requires writing."
+    );
+    let resume = storage::get_claude_session(&conn, &session_id).ok().flatten();
+    let agent_md = read_agent_md(&vault_path);
+
+    claude::spawn_run(
+        app,
+        claude::RunOpts {
+            claude_path: info.path,
+            vault: vault_path,
+            db_path: state.db_path.clone(),
+            app_session: session_id,
+            prompt,
+            model: s.claude_model.clone(),
+            resume_sid: resume,
+            max_budget: s.max_budget_usd,
+            append_system: agent_md,
+            kind: "chat".into(),
+            persist: true,
+        },
+    );
+    Ok(())
+}
+
 #[tauri::command]
 fn process_meeting(app: AppHandle, state: State<AppState>, session_id: String) -> Result<(), String> {
     let s = state.settings.lock().clone();
@@ -212,6 +392,7 @@ fn process_meeting(app: AppHandle, state: State<AppState>, session_id: String) -
     );
     let resume = storage::get_claude_session(&conn, &session_id).ok().flatten();
 
+    let agent_md = read_agent_md(&vault_path);
     claude::spawn_run(
         app,
         claude::RunOpts {
@@ -223,6 +404,9 @@ fn process_meeting(app: AppHandle, state: State<AppState>, session_id: String) -
             model: s.claude_model.clone(),
             resume_sid: resume,
             max_budget: s.max_budget_usd,
+            append_system: agent_md,
+            kind: "chat".into(),
+            persist: true,
         },
     );
     Ok(())
@@ -256,6 +440,7 @@ fn chat_send(
         )
     };
 
+    let agent_md = read_agent_md(&vault_path);
     claude::spawn_run(
         app,
         claude::RunOpts {
@@ -267,6 +452,9 @@ fn chat_send(
             model: s.claude_model.clone(),
             resume_sid: resume,
             max_budget: s.max_budget_usd,
+            append_system: agent_md,
+            kind: "chat".into(),
+            persist: true,
         },
     );
     Ok(())
@@ -284,6 +472,45 @@ fn open_in_obsidian(app: AppHandle, file: String) -> Result<(), String> {
     app.opener()
         .open_url(uri, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reveal_in_finder(app: AppHandle, file: String) -> Result<(), String> {
+    app.opener()
+        .reveal_item_in_dir(PathBuf::from(file))
+        .map_err(|e| e.to_string())
+}
+
+fn vault_root(state: &State<AppState>) -> Result<PathBuf, String> {
+    let p = state.settings.lock().vault_path.clone();
+    if p.is_empty() {
+        return Err("No knowledge folder set up.".into());
+    }
+    Ok(PathBuf::from(p))
+}
+
+#[tauri::command]
+fn vault_tree(state: State<AppState>) -> Result<Vec<vault::Node>, String> {
+    let root = vault_root(&state)?;
+    Ok(vault::tree(&root))
+}
+
+#[tauri::command]
+fn read_note(state: State<AppState>, path: String) -> Result<String, String> {
+    let root = vault_root(&state)?;
+    vault::read_note(&root, Path::new(&path)).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn write_note(state: State<AppState>, path: String, content: String) -> Result<(), String> {
+    let root = vault_root(&state)?;
+    vault::write_note(&root, Path::new(&path), &content).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn resolve_wikilink(state: State<AppState>, name: String) -> Result<Option<String>, String> {
+    let root = vault_root(&state)?;
+    Ok(vault::resolve_link(&root, &name).map(|p| p.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -349,9 +576,16 @@ pub fn run() {
             get_vault_status,
             setup_vault,
             process_meeting,
+            update_meeting,
+            story_update,
             chat_send,
             get_chat,
             open_in_obsidian,
+            reveal_in_finder,
+            vault_tree,
+            read_note,
+            write_note,
+            resolve_wikilink,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

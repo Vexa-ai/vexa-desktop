@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Open-source local meeting recorder + transcription (a Granola-style client for Vexa)"
 authors = ["Vexa"]
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Vexa-ai/vexa-desktop"
 
 [lib]
 # The `_lib` suffix avoids a name clash with the bin target on Windows.

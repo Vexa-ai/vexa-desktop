@@ -71,28 +71,38 @@ pub struct RunOpts {
     pub model: String,
     pub resume_sid: Option<String>,
     pub max_budget: Option<f64>,
+    /// Extra system prompt (the vault's `agent.md`), appended to Claude's default.
+    pub append_system: Option<String>,
+    /// Routing tag for UI events: "chat" (assistant panel) or "story" (story tab).
+    pub kind: String,
+    /// Persist the claude session id + reply into chat history (chat only).
+    pub persist: bool,
 }
 
 #[derive(Clone, Serialize)]
 struct DeltaEvent {
     session: String,
+    kind: String,
     text: String,
 }
 #[derive(Clone, Serialize)]
 struct ToolEvent {
     session: String,
+    kind: String,
     name: String,
     file: Option<String>,
 }
 #[derive(Clone, Serialize)]
 struct ResultEvent {
     session: String,
+    kind: String,
     text: String,
     cost_usd: Option<f64>,
 }
 #[derive(Clone, Serialize)]
 struct ErrEvent {
     session: String,
+    kind: String,
     message: String,
 }
 
@@ -107,6 +117,7 @@ pub fn spawn_run(app: AppHandle, opts: RunOpts) {
                     "claude-error",
                     ErrEvent {
                         session: opts.app_session.clone(),
+                        kind: opts.kind.clone(),
                         message: format!("{e:#}"),
                     },
                 );
@@ -130,6 +141,11 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
         .arg("Read Write Edit Glob Grep")
         .arg("--model")
         .arg(&opts.model);
+    if let Some(sys) = &opts.append_system {
+        if !sys.trim().is_empty() {
+            cmd.arg("--append-system-prompt").arg(sys);
+        }
+    }
     if let Some(sid) = &opts.resume_sid {
         cmd.arg("--resume").arg(sid);
     }
@@ -197,6 +213,7 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
                                         "claude-delta",
                                         DeltaEvent {
                                             session: opts.app_session.clone(),
+                                            kind: opts.kind.clone(),
                                             text: t.to_string(),
                                         },
                                     );
@@ -219,6 +236,7 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
                                     "claude-tool",
                                     ToolEvent {
                                         session: opts.app_session.clone(),
+                                        kind: opts.kind.clone(),
                                         name,
                                         file,
                                     },
@@ -244,14 +262,17 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
     let status = child.wait().ok();
     let stderr_text = err_handle.join().unwrap_or_default();
 
-    // Persist claude session id (for resume) + the assistant reply.
-    if let Ok(conn) = storage::open(&opts.db_path) {
-        if let Some(sid) = &claude_sid {
-            let _ = storage::set_claude_session(&conn, &opts.app_session, sid);
-        }
-        if !final_text.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = storage::insert_chat(&conn, &opts.app_session, "assistant", &final_text, &now);
+    // Persist claude session id (for resume) + the assistant reply (chat only).
+    if opts.persist {
+        if let Ok(conn) = storage::open(&opts.db_path) {
+            if let Some(sid) = &claude_sid {
+                let _ = storage::set_claude_session(&conn, &opts.app_session, sid);
+            }
+            if !final_text.is_empty() {
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ =
+                    storage::insert_chat(&conn, &opts.app_session, "assistant", &final_text, &now);
+            }
         }
     }
 
@@ -271,6 +292,7 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
         "claude-result",
         ResultEvent {
             session: opts.app_session.clone(),
+            kind: opts.kind.clone(),
             text: final_text,
             cost_usd: cost,
         },

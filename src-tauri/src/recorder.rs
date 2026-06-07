@@ -122,6 +122,16 @@ pub fn start(
     let active_sources: Vec<String> =
         sources.active.iter().map(|(s, _)| s.as_str().to_string()).collect();
 
+    // Periodic screen frames (timestamped, for later speaker naming).
+    if settings.capture_frames {
+        let frames_dir = audio_dir.join(format!("{session_id}-frames"));
+        let interval = std::time::Duration::from_secs(settings.frame_interval_secs.max(1));
+        match crate::frames::spawn(frames_dir, interval, stop.clone()) {
+            Ok(h) => handles.push(h),
+            Err(e) => log::warn!("frames capture not started: {e:#}"),
+        }
+    }
+
     // One shared chunk channel; one transcriber drains all sources.
     let (chunk_tx, chunk_rx) = crossbeam_channel::unbounded::<chunker::Chunk>();
 

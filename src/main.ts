@@ -346,21 +346,26 @@ interface NameState {
   named: boolean;
   lastCli: number; // ts of last actual CLI invocation (retry safety floor)
   speechAtCli: number; // total speech (s) at last CLI invocation
+  triedFrames: Set<number>; // frame timestamps (ms) already used — vary across retries
 }
 const nameState = new Map<string, NameState>();
 let namingBusy = false;
 let lastQueueRun = 0;
 let queueThrottle: number | undefined;
 const MIN_SPEECH_S = 3; // need this much total speech before the first attempt
-const RETRY_SPEECH_DELTA_S = 8; // only retry after this much *additional* speech
-const NAME_MAX_TRIES = 3; // give up after this many unreadable CLI attempts
-const NAME_RETRY_FLOOR_MS = 20000; // and never retry the same speaker faster than this
+const RETRY_SPEECH_DELTA_S = 2; // retry once the speaker has spoken ~this much more (i.e. again)
+const NAME_MAX_TRIES = 8; // try hard before giving up
+const NAME_RETRY_FLOOR_MS = 9000; // but never retry the same speaker faster than this
 const FRAME_MAX_GAP_MS = 8000; // only use a frame within this of the speaking moment
+const FRAMES_PER_ATTEMPT = 2; // distinct speaking-moment frames per attempt (more evidence)
 const QUEUE_THROTTLE_MS = 3000; // don't recompute the queue more often than this
 
 function nstate(sid: string): NameState {
   let st = nameState.get(sid);
-  if (!st) { st = { tries: 0, named: false, lastCli: 0, speechAtCli: 0 }; nameState.set(sid, st); }
+  if (!st) {
+    st = { tries: 0, named: false, lastCli: 0, speechAtCli: 0, triedFrames: new Set() };
+    nameState.set(sid, st);
+  }
   return st;
 }
 function totalSpeech(sid: string): number {
@@ -368,16 +373,15 @@ function totalSpeech(sid: string): number {
   for (const d of diarLabels) if (d.speakerId === sid) s += d.end - d.start;
   return s;
 }
-function longestSpan(sid: string): { start: number; end: number } | null {
-  let best: { start: number; end: number } | null = null;
-  for (const d of diarLabels) {
-    if (d.speakerId !== sid) continue;
-    if (!best || d.end - d.start > best.end - best.start) best = { start: d.start, end: d.end };
-  }
-  return best;
+// This speaker's speaking spans, longest first (each a candidate frame moment).
+function speakerSpans(sid: string): { start: number; end: number }[] {
+  return diarLabels
+    .filter((d) => d.speakerId === sid && d.end - d.start >= 0.8)
+    .map((d) => ({ start: d.start, end: d.end }))
+    .sort((a, b) => b.end - b.start - (a.end - a.start));
 }
 // Eligible = unnamed, under the try cap, has enough speech, and (if already
-// attempted) has both waited the floor AND gained meaningful new speech.
+// attempted) has waited the floor AND spoken again since (so a fresh frame exists).
 function eligible(sid: string, now: number): boolean {
   const st = nstate(sid);
   if (st.named || st.tries >= NAME_MAX_TRIES) return false;
@@ -385,7 +389,7 @@ function eligible(sid: string, now: number): boolean {
   if (speech < MIN_SPEECH_S) return false;
   if (st.tries >= 1) {
     if (now - st.lastCli < NAME_RETRY_FLOOR_MS) return false;
-    if (speech < st.speechAtCli + RETRY_SPEECH_DELTA_S) return false; // no new info → don't spend a call
+    if (speech < st.speechAtCli + RETRY_SPEECH_DELTA_S) return false; // hasn't spoken again yet
   }
   return true;
 }
@@ -429,23 +433,35 @@ async function nameOne(sid: string) {
   const st = nstate(sid);
   const num = speakerNums.get(sid);
   if (num == null) return;
-  const span = longestSpan(sid);
-  if (!span) return; // nothing usable yet — cheap defer, no CLI, no state change
+  const spans = speakerSpans(sid);
+  if (!spans.length) return; // nothing usable yet — cheap defer, no CLI, no state change
   let frames: { ms: number; path: string }[] = [];
   try {
     frames = await invoke<{ ms: number; path: string }[]>("list_frames", { sessionId: viewSessionId });
   } catch { /* none */ }
   if (!frames.length) return; // frames not captured yet → defer (no CLI)
-  const midMs = ((span.start + span.end) / 2) * 1000;
-  const frame = frames.reduce((a, b) => (Math.abs(b.ms - midMs) < Math.abs(a.ms - midMs) ? b : a));
-  if (Math.abs(frame.ms - midMs) > FRAME_MAX_GAP_MS) return; // wait for a closer frame → defer (no CLI)
+  // Pick up to FRAMES_PER_ATTEMPT frames at DISTINCT, not-yet-tried speaking
+  // moments (so retries look at fresh evidence, never the same frame twice).
+  const pick: string[] = [];
+  const pickMs = new Set<number>();
+  for (const sp of spans) {
+    if (pick.length >= FRAMES_PER_ATTEMPT) break;
+    const midMs = ((sp.start + sp.end) / 2) * 1000;
+    const f = frames.reduce((a, b) => (Math.abs(b.ms - midMs) < Math.abs(a.ms - midMs) ? b : a));
+    if (Math.abs(f.ms - midMs) > FRAME_MAX_GAP_MS) continue;
+    if (st.triedFrames.has(f.ms) || pickMs.has(f.ms)) continue;
+    pick.push(f.path);
+    pickMs.add(f.ms);
+  }
+  if (!pick.length) return; // no fresh frame to try yet → defer (no CLI, no state change)
   // Committing to an actual CLI call now.
-  const label = `Speaker ${num}`;
+  pickMs.forEach((ms) => st.triedFrames.add(ms));
   st.lastCli = Date.now();
   st.speechAtCli = totalSpeech(sid);
+  const label = `Speaker ${num}`;
   try {
     const res = await invoke<{ label: string; name: string }[]>("name_speakers", {
-      items: [{ label, frame: frame.path }],
+      items: [{ label, frames: pick }],
     });
     const r = res.find((x) => x.label === label);
     if (r && r.name && r.name.toUpperCase() !== "UNKNOWN") {
@@ -471,7 +487,12 @@ function nameNow() {
   }
   for (const [sid] of speakerNums) {
     const st = nstate(sid);
-    if (!st.named) { st.tries = 0; st.lastCli = 0; st.speechAtCli = 0; } // fresh attempt now
+    if (!st.named) {
+      st.tries = 0;
+      st.lastCli = 0;
+      st.speechAtCli = 0;
+      st.triedFrames.clear(); // re-examine all frames on a manual retry
+    }
   }
   banner("Naming speakers from screen frames…", "info");
   setTimeout(() => banner(""), 2500);
@@ -527,10 +548,51 @@ async function toggleRecording() {
   else await startRecording();
 }
 
+interface WindowInfo { id: number; app: string; title: string }
+// Modal: pick which window to capture for frames. Resolves to a window id
+// (string), "fullscreen", "none" (audio only), or null to abort the recording.
+function chooseCaptureTarget(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = $("capture-overlay");
+    const list = $("capture-list");
+    const close = (val: string | null) => {
+      overlay.classList.add("hidden");
+      list.innerHTML = "";
+      resolve(val);
+    };
+    list.innerHTML = `<div class="cap-empty">Loading windows…</div>`;
+    overlay.classList.remove("hidden");
+    invoke<WindowInfo[]>("list_windows")
+      .then((wins) => {
+        list.innerHTML = "";
+        if (!wins.length) {
+          list.innerHTML = `<div class="cap-empty">No windows found. Use Full screen, or grant Screen Recording in System Settings.</div>`;
+        }
+        for (const w of wins) {
+          const row = document.createElement("button");
+          row.className = "cap-row";
+          row.innerHTML = `<span class="cap-app"></span><span class="cap-title"></span>`;
+          (row.querySelector(".cap-app") as HTMLElement).textContent = w.app;
+          (row.querySelector(".cap-title") as HTMLElement).textContent = w.title;
+          row.onclick = () => close(String(w.id));
+          list.appendChild(row);
+        }
+      })
+      .catch(() => {
+        list.innerHTML = `<div class="cap-empty">Couldn't list windows. Use Full screen.</div>`;
+      });
+    $("capture-fullscreen").onclick = () => close("fullscreen");
+    $("capture-none").onclick = () => close("none");
+    $("capture-cancel").onclick = () => close(null);
+  });
+}
+
 async function startRecording() {
   banner("");
+  const frameTarget = await chooseCaptureTarget();
+  if (frameTarget === null) return; // cancelled — don't start
   try {
-    const res = await invoke<{ session_id: string }>("start_recording", { title: null });
+    const res = await invoke<{ session_id: string }>("start_recording", { title: null, frameTarget });
     viewSessionId = res.session_id;
     recording = true;
     $("session-title").textContent = "Recording…";

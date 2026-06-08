@@ -20,6 +20,7 @@ pub fn spawn(
     frames_dir: PathBuf,
     interval: Duration,
     stop: Arc<AtomicBool>,
+    window: Option<u32>,
 ) -> Result<JoinHandle<()>> {
     std::fs::create_dir_all(&frames_dir)
         .with_context(|| format!("create frames dir {}", frames_dir.display()))?;
@@ -38,34 +39,41 @@ pub fn spawn(
                 if elapsed >= next {
                     let ms = elapsed.as_millis();
                     let path = frames_dir.join(format!("{ms}.jpg"));
-                    if capture(&path) {
+                    if capture(&path, window) {
                         count += 1;
                     }
                     next = elapsed + interval;
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
-            log::info!("[frames] captured {count} frame(s) → {}", frames_dir.display());
+            let what = window.map(|w| format!("window {w}")).unwrap_or_else(|| "all displays".into());
+            log::info!("[frames] captured {count} frame(s) of {what} → {}", frames_dir.display());
         })
         .context("spawn frames thread")?;
     Ok(handle)
 }
 
-/// Capture every connected display. `path` (`<ms>.jpg`) gets display 1 (main);
-/// additional displays go to `<ms>-d2.jpg`, `<ms>-d3.jpg`, … so a call on a
-/// non-main screen is still captured. Returns true if the main frame was saved.
+/// Capture a frame. With a `window` id, grab just that window
+/// (`screencapture -l<id>`) — occlusion-independent, so the call need not be
+/// visible. Otherwise capture every display (`<ms>.jpg` = display 1, others →
+/// `<ms>-d2.jpg`…). Returns true if the frame was saved.
 #[cfg(target_os = "macos")]
-fn capture(path: &Path) -> bool {
-    // `screencapture` is Apple's native tool; runs under our Screen-Recording
-    // grant. Passing N file args writes one file per display (display 1 → first
-    // path); extra paths beyond the display count are simply not created.
+fn capture(path: &Path, window: Option<u32>) -> bool {
+    // `screencapture` is Apple's native tool; runs under our Screen-Recording grant.
     let mut cmd = std::process::Command::new("screencapture");
-    cmd.args(["-x", "-t", "jpg"]).arg(path);
-    if let (Some(stem), Some(dir)) =
-        (path.file_stem().and_then(|s| s.to_str()), path.parent())
-    {
-        for d in 2..=4 {
-            cmd.arg(dir.join(format!("{stem}-d{d}.jpg")));
+    cmd.args(["-x", "-t", "jpg"]);
+    if let Some(id) = window {
+        // -l<id>: capture exactly this window (content composited even if
+        // occluded/behind others); -o: omit the window's drop shadow.
+        cmd.arg("-o").arg(format!("-l{id}")).arg(path);
+    } else {
+        cmd.arg(path);
+        if let (Some(stem), Some(dir)) =
+            (path.file_stem().and_then(|s| s.to_str()), path.parent())
+        {
+            for d in 2..=4 {
+                cmd.arg(dir.join(format!("{stem}-d{d}.jpg")));
+            }
         }
     }
     match cmd.status() {
@@ -82,7 +90,7 @@ fn capture(path: &Path) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture(_path: &Path) -> bool {
+fn capture(_path: &Path, _window: Option<u32>) -> bool {
     // TODO: Windows (PrintWindow/DXGI) and Linux (grim/scrot) capture.
     false
 }

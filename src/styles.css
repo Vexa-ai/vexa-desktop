@@ -144,6 +144,23 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .bubble-line.mic .bubble { background: var(--mic-bg); color: var(--mic-text); border-bottom-right-radius: 5px; }
 .bubble-line.system .bubble { background: var(--sys-bg); color: var(--sys-text); border-bottom-left-radius: 5px; }
 
+/* Capture-target picker */
+.cap-dialog { width: 520px; }
+.cap-hint { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.capture-list {
+  max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 6px; background: #fbfbf8;
+}
+.cap-empty { color: var(--muted); font-size: 13px; padding: 22px 10px; text-align: center; }
+.cap-row {
+  display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer;
+  background: transparent; border: none; border-radius: 7px; padding: 8px 10px; width: 100%;
+}
+.cap-row:hover { background: rgba(108,140,255,0.12); }
+.cap-app { font-weight: 700; font-size: 12.5px; color: var(--accent); white-space: nowrap; }
+.cap-title { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-actions { margin-top: 4px; }
+
 /* Settings dialog */
 .overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.28);

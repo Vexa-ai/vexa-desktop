@@ -93,6 +93,10 @@ pub fn start(
     audio_dir: PathBuf,
     settings: Settings,
     title: String,
+    // Frame capture target chosen at Start: Some(id) = that window;
+    // None with fullscreen flag handled by the caller. `None` here = no frames.
+    frame_window: Option<u32>,
+    frame_fullscreen: bool,
 ) -> Result<RecorderHandle> {
     std::fs::create_dir_all(&audio_dir).ok();
 
@@ -126,11 +130,13 @@ pub fn start(
     let active_sources: Vec<String> =
         sources.active.iter().map(|(s, _)| s.as_str().to_string()).collect();
 
-    // Periodic screen frames (timestamped, for later speaker naming).
-    if settings.capture_frames {
+    // Periodic screen frames (timestamped, for speaker naming / slides).
+    // Captured only when a target was chosen at Start: a specific window
+    // (occlusion-independent) or full screen. No target → no frames.
+    if frame_window.is_some() || frame_fullscreen {
         let frames_dir = audio_dir.join(format!("{session_id}-frames"));
         let interval = std::time::Duration::from_secs(settings.frame_interval_secs.max(1));
-        match crate::frames::spawn(frames_dir, interval, stop.clone()) {
+        match crate::frames::spawn(frames_dir, interval, stop.clone(), frame_window) {
             Ok(h) => handles.push(h),
             Err(e) => log::warn!("frames capture not started: {e:#}"),
         }

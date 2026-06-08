@@ -15,6 +15,7 @@ mod settings;
 mod storage;
 mod transcribe;
 mod vault;
+mod windows;
 
 use std::path::{Path, PathBuf};
 
@@ -64,11 +65,20 @@ fn is_recording(state: State<AppState>) -> bool {
     state.recorder.lock().is_some()
 }
 
+/// List capturable windows for the Start-recording picker.
+#[tauri::command]
+fn list_windows() -> Result<Vec<windows::WindowInfo>, String> {
+    Ok(windows::list())
+}
+
 #[tauri::command]
 fn start_recording(
     app: AppHandle,
     state: State<AppState>,
     title: Option<String>,
+    // Frame target chosen in the picker: a window id (as string), "fullscreen",
+    // or "none"/absent (record audio only, no frames).
+    frame_target: Option<String>,
 ) -> Result<StartResult, String> {
     let mut guard = state.recorder.lock();
     if guard.is_some() {
@@ -78,12 +88,22 @@ fn start_recording(
     let title = title.unwrap_or_else(|| {
         format!("Recording {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
     });
+    let (frame_window, frame_fullscreen) = match frame_target.as_deref() {
+        Some("fullscreen") => (None, true),
+        Some(s) => match s.parse::<u32>() {
+            Ok(id) => (Some(id), false),
+            Err(_) => (None, false), // "none" or unrecognized → no frames
+        },
+        None => (None, false),
+    };
     let handle = recorder::start(
         app,
         state.db_path.clone(),
         state.audio_dir.clone(),
         settings,
         title,
+        frame_window,
+        frame_fullscreen,
     )
     .map_err(|e| format!("{e:#}"))?;
     let session_id = handle.session_id.clone();
@@ -670,7 +690,9 @@ fn delete_session(state: State<AppState>, id: String) -> Result<(), String> {
 #[derive(serde::Deserialize)]
 struct NameItem {
     label: String,
-    frame: String,
+    /// Frames from several distinct moments this speaker was talking — more
+    /// evidence per call, and varied across retries.
+    frames: Vec<String>,
 }
 #[derive(Serialize)]
 struct FrameRef {
@@ -793,7 +815,11 @@ async fn name_speakers(
 
 fn name_speakers_blocking(s: Settings, items: Vec<NameItem>) -> Result<Vec<NameResult>, String> {
     let info = claude::detect(opt(&s.claude_path)).map_err(|e| e.to_string())?;
-    let frames_dir = Path::new(&items[0].frame)
+    let first = items
+        .iter()
+        .find_map(|it| it.frames.first())
+        .ok_or_else(|| "no frames".to_string())?;
+    let frames_dir = Path::new(first)
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| "bad frame path".to_string())?;
@@ -804,26 +830,29 @@ fn name_speakers_blocking(s: Settings, items: Vec<NameItem>) -> Result<Vec<NameR
     let tiles_dir = frames_dir.join(".tiles");
     std::fs::remove_dir_all(&tiles_dir).ok();
     let mut prompt = String::from(
-        "These are screenshots from a video call (Zoom / Google Meet / Teams). Each speaker's \
-         screenshot is split into overlapping quadrant tiles so small text stays legible — Read \
-         ALL of a label's tiles to reconstruct the full screen. For each label, identify the NAME \
-         of the ACTIVE speaker: the person whose video tile is highlighted with a speaking border \
-         at that moment (read the name label on that tile). If you cannot tell, answer UNKNOWN.\n\
+        "These are screenshots from a video call (Zoom / Google Meet / Teams), captured at \
+         SEVERAL moments while ONE person (the label) was talking. Each screenshot is split into \
+         overlapping quadrant tiles so small text stays legible — Read ALL of a label's tiles. \
+         Work hard: cross-reference across the moments — the active speaker is the tile \
+         highlighted with a speaking border (and the one consistently highlighted across these \
+         moments). Read the NAME label on that tile. Try every tile before giving up; answer \
+         UNKNOWN only if no name is legible anywhere.\n\
          Reply with EXACTLY one line per label, formatted `Label: Name` — nothing else.\n\n",
     );
     for (i, it) in items.iter().enumerate() {
-        // One capture may span several displays (`<ms>.jpg` + `<ms>-d2.jpg`…);
-        // the call could be on any of them, so tile and pass them all.
-        let screens = sibling_frames(Path::new(&it.frame));
+        // Several moments × several displays (`<ms>.jpg` + `<ms>-d2.jpg`…) — tile them all so
+        // the model has maximum evidence to read the active speaker's name.
         let mut tiles = Vec::new();
-        for (j, sc) in screens.iter().enumerate() {
-            tiles.extend(tile_frame(sc, &tiles_dir, &format!("s{i}_{j}")));
+        for (fi, fpath) in it.frames.iter().enumerate() {
+            for (j, sc) in sibling_frames(Path::new(fpath)).iter().enumerate() {
+                tiles.extend(tile_frame(sc, &tiles_dir, &format!("s{i}_{fi}_{j}")));
+            }
         }
         prompt.push_str(&format!(
-            "{} — tiles from {} screen(s) at one moment, each split into quadrants \
-             (the active speaker is somewhere across these):\n",
+            "{} — tiles from {} moment(s) this speaker was talking, each split into quadrants \
+             (the active speaker is the consistently border-highlighted tile across them):\n",
             it.label,
-            screens.len()
+            it.frames.len()
         ));
         for t in &tiles {
             prompt.push_str(&format!("  {}\n", t.display()));
@@ -911,6 +940,7 @@ pub fn run() {
             get_settings,
             save_settings,
             is_recording,
+            list_windows,
             start_recording,
             stop_recording,
             list_sessions,

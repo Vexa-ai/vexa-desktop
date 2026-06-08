@@ -107,6 +107,20 @@
       </section>
     </div>
 
+    <!-- Capture-target picker (shown on Start) -->
+    <div id="capture-overlay" class="overlay hidden">
+      <div class="dialog cap-dialog">
+        <h2>Record which window?</h2>
+        <p class="cap-hint">Pick the meeting window — it's captured even when hidden behind others, so you can work over it. Or capture the full screen.</p>
+        <div id="capture-list" class="capture-list"></div>
+        <div class="dialog-actions cap-actions">
+          <button id="capture-cancel" class="ghost">Cancel</button>
+          <button id="capture-none" class="ghost">No capture</button>
+          <button id="capture-fullscreen" class="primary">🖥 Full screen</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Settings dialog -->
     <div id="settings-overlay" class="overlay hidden">
       <div class="dialog">

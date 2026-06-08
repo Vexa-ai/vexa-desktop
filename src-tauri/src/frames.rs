@@ -51,16 +51,25 @@ pub fn spawn(
     Ok(handle)
 }
 
-/// Capture the main display to `path`. Returns true on success.
+/// Capture every connected display. `path` (`<ms>.jpg`) gets display 1 (main);
+/// additional displays go to `<ms>-d2.jpg`, `<ms>-d3.jpg`, … so a call on a
+/// non-main screen is still captured. Returns true if the main frame was saved.
 #[cfg(target_os = "macos")]
 fn capture(path: &Path) -> bool {
-    // `screencapture` is Apple's native tool; runs under our Screen-Recording grant.
-    match std::process::Command::new("screencapture")
-        .args(["-x", "-t", "jpg"])
-        .arg(path)
-        .status()
+    // `screencapture` is Apple's native tool; runs under our Screen-Recording
+    // grant. Passing N file args writes one file per display (display 1 → first
+    // path); extra paths beyond the display count are simply not created.
+    let mut cmd = std::process::Command::new("screencapture");
+    cmd.args(["-x", "-t", "jpg"]).arg(path);
+    if let (Some(stem), Some(dir)) =
+        (path.file_stem().and_then(|s| s.to_str()), path.parent())
     {
-        Ok(s) if s.success() => true,
+        for d in 2..=4 {
+            cmd.arg(dir.join(format!("{stem}-d{d}.jpg")));
+        }
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => path.exists(),
         Ok(s) => {
             log::warn!("[frames] screencapture exited {s}");
             false

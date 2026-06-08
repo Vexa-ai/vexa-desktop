@@ -28,6 +28,9 @@ cpal = "0.15"
 hound = "3"
 # Local storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Image tiling for speaker-naming (keeps Zoom name labels legible past the
+# vision Read tool's downscale by splitting frames into overlapping quadrants)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # HTTP client for the transcription service (multipart upload)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
 anyhow = "1"

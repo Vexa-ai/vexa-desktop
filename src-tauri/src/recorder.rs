@@ -56,6 +56,7 @@ pub struct RecorderHandle {
     pub session_id: String,
     pub audio_base: PathBuf,
     duration: chunker::DurationHandle,
+    diar: Option<crate::diarize::DiarHandle>,
 }
 
 impl RecorderHandle {
@@ -63,6 +64,9 @@ impl RecorderHandle {
     /// emit the stopped event. Returns the recording duration in seconds.
     pub fn stop(mut self, app: &AppHandle, db_path: &std::path::Path) -> f64 {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(d) = &self.diar {
+            d.stop();
+        }
         for h in self.handles.drain(..) {
             let _ = h.join();
         }
@@ -132,6 +136,25 @@ pub fn start(
         }
     }
 
+    // Real-time speaker diarization of system audio (Speaker 1/2/3…).
+    let diar = if settings.diarize {
+        match crate::diarize::find_dir(Some(&settings.diarizer_dir)) {
+            Some(dir) => match crate::diarize::spawn(app.clone(), session_id.clone(), dir) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    log::warn!("diarizer not started: {e:#}");
+                    None
+                }
+            },
+            None => {
+                log::warn!("diarizer tool dir not found; speaker labels disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // One shared chunk channel; one transcriber drains all sources.
     let (chunk_tx, chunk_rx) = crossbeam_channel::unbounded::<chunker::Chunk>();
 
@@ -141,6 +164,31 @@ pub fn start(
         handles.push(pacer);
 
         let wav_path = audio_dir.join(format!("{session_id}-{}.wav", source.as_str()));
+
+        // Tee the system-audio stream into the diarizer (if running) on the way
+        // to its chunker; mic goes straight through.
+        if matches!(source, audio::Source::System) {
+            if let Some(dh) = diar.clone() {
+                let (cin_tx, cin_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
+                let tee = std::thread::Builder::new()
+                    .name("vexa-diar-tee".into())
+                    .spawn(move || {
+                        for block in paced_rx.iter() {
+                            dh.write_f32(&block);
+                            if cin_tx.send(block).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .context("spawn diar tee")?;
+                handles.push(tee);
+                let chunker_handle =
+                    chunker::spawn(cin_rx, chunk_tx.clone(), wav_path, duration.clone(), source)?;
+                handles.push(chunker_handle);
+                continue;
+            }
+        }
+
         let chunker_handle = chunker::spawn(
             paced_rx,
             chunk_tx.clone(),
@@ -179,6 +227,7 @@ pub fn start(
         session_id,
         audio_base,
         duration,
+        diar,
     })
 }
 

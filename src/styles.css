@@ -128,16 +128,18 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .banner.info { border-color: #d6dcc4; background: #f3f6e8; }
 
 /* Transcript — chat bubbles */
-.transcript { flex: 1; overflow-y: auto; padding: 14px 24px 28px; }
-.transcript .empty { color: var(--muted); font-size: 14px; padding: 48px 0; text-align: center; }
+.stream { flex: 1; overflow-y: auto; padding: 10px 20px 22px; }
+.transcript { display: block; }
+.transcript .empty { color: var(--muted); font-size: 14px; padding: 40px 0; text-align: center; }
 
-.seg-row { margin: 10px 0; }
-.seg-ts { text-align: center; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.seg-row { margin: 4px 0; }
+.seg-ts { text-align: center; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; margin-bottom: 1px; opacity: 0.7; }
+.speaker-tag { font-size: 10.5px; font-weight: 700; color: var(--accent); margin: 0 0 1px 2px; }
 .bubble-line { display: flex; }
 .bubble-line.mic { justify-content: flex-end; }
 .bubble-line.system { justify-content: flex-start; }
 .bubble {
-  max-width: 76%; padding: 11px 15px; border-radius: 16px; font-size: 15px; line-height: 1.45;
+  max-width: 82%; padding: 6px 11px; border-radius: 11px; font-size: 13.5px; line-height: 1.35;
 }
 .bubble-line.mic .bubble { background: var(--mic-bg); color: var(--mic-text); border-bottom-right-radius: 5px; }
 .bubble-line.system .bubble { background: var(--sys-bg); color: var(--sys-text); border-bottom-left-radius: 5px; }
@@ -169,27 +171,38 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .work { flex: 1; display: flex; min-height: 0; }
 .transcript-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-/* View tabs (Transcript | Story) */
-.view-tabs { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--border); }
-.view-tab {
-  background: transparent; border: none; border-bottom: 2px solid transparent;
-  padding: 8px 12px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer;
+/* Single transcript/story header */
+.view-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
 }
-.view-tab:hover { color: var(--text); }
-.view-tab.active { color: var(--text); border-bottom-color: var(--accent); }
-.live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-left: 4px; animation: blink 1.4s infinite; }
+.view-title { font-size: 13px; font-weight: 700; color: var(--text); }
+#name-speakers { margin-left: auto; align-self: center; }
+.live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-left: 2px; animation: blink 1.4s infinite; }
 
 .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.story-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 24px; border-bottom: 1px solid var(--border);
+
+/* Polished story (rendered above the raw live tail in the same scroll).
+   Each turn = a prominent speaker label + its cleaned paragraph, with a left
+   accent rail so it reads as an attributed transcript, not a wall of prose. */
+.polished { font-size: 13.5px; line-height: 1.4; }
+.polished h4 {
+  font-size: 11.5px; font-weight: 700; color: var(--accent);
+  margin: 9px 0 1px; padding: 0; letter-spacing: 0.01em;
 }
-.story-status { font-size: 12px; color: var(--muted); }
-.story-status.working { color: var(--accent); }
-.story-body { flex: 1; overflow-y: auto; padding: 22px 28px; }
-.story-body .empty { color: var(--muted); text-align: center; padding: 40px 0; }
-.story-body a.wikilink { background: rgba(108,140,255,0.14); padding: 0 4px; border-radius: 4px; cursor: pointer; }
-.story-body a.wikilink.missing { color: var(--rec); background: rgba(224,72,63,0.1); }
+.polished h4:first-child { margin-top: 2px; }
+.polished p {
+  margin: 0 0 2px; padding: 0 0 0 10px;
+  border-left: 2px solid var(--border);
+}
+/* entities → clickable research chips */
+.polished a.kw {
+  background: rgba(108,140,255,0.14); color: inherit; text-decoration: none;
+  padding: 0 4px; border-radius: 4px; cursor: pointer;
+}
+.polished a.kw:hover { background: rgba(108,140,255,0.28); }
+/* numbers/metrics highlighted by the polish pass */
+.polished strong { font-weight: 700; color: var(--text); background: rgba(214,184,72,0.22); padding: 0 3px; border-radius: 3px; }
 .chat-col {
   width: 440px; min-width: 360px; display: flex; flex-direction: column;
   border-left: 1px solid var(--border); background: var(--panel);

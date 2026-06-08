@@ -8,6 +8,7 @@
 mod audio;
 mod chunker;
 mod claude;
+mod diarize;
 mod frames;
 mod recorder;
 mod settings;
@@ -283,6 +284,106 @@ fn story_update(
     })
 }
 
+/// The polish persona: turn a raw attributed transcript window into a clean,
+/// readable, attributed story with clickable entities + highlighted numbers.
+const POLISH_PROMPT: &str = "\
+You maintain a CONDENSED, FIRST-PERSON live meeting transcript as ONE Markdown \
+document. You are given the CURRENT DOCUMENT (already condensed) and NEW RAW \
+LINES just transcribed. Return the COMPLETE updated document — a holistic file \
+edit, not an append.\n\
+Rules:\n\
+- Write each turn in the SPEAKER'S OWN FIRST-PERSON VOICE (I / we), as a tight \
+  paraphrase of what they actually said — as if they wrote a crisp note. NEVER \
+  use third-person reporting verbs (no `discussed`, `praised`, `noted`, `asked`, \
+  `acknowledges`, `notes that`). e.g. not \"Praised the proposal\" but \"This \
+  proposal is well-prepared — I like the multifunctional approach.\"\n\
+- Keep ONLY meaningful content: decisions, facts, figures, asks, positions. DROP \
+  procedural/meta chatter that carries no information (\"someone raised their \
+  hand\", \"had been muted\", \"thanks\", \"right\", \"yes thanks\") and garbled \
+  fragments. If a turn has no substance, omit it entirely.\n\
+- Integrate the new lines, then RECONSIDER the whole document: merge adjacent \
+  same-speaker turns, unify a speaker's name spelling across the doc when newer \
+  context clarifies it, dedupe, and tighten. Compress hard: ~1 line per turn.\n\
+- Each kept turn: `#### <Speaker> · <mm:ss>` on its own line, the first-person \
+  line(s) below. Paraphrase freely for brevity; NEVER invent content or names.\n\
+- Wrap ENTITIES (people, companies, products, projects, places, orgs) in \
+  [[double brackets]]; wrap key NUMBERS / dates / money / percentages in **bold**.\n\
+- Output ONLY the full Markdown document. Do NOT acknowledge these instructions, \
+  add a preamble, heading, or any commentary.\n";
+
+/// Local path for a session's living polished transcript document.
+fn story_path(audio_dir: &Path, session_id: &str) -> PathBuf {
+    audio_dir.join(format!("{session_id}-story.md"))
+}
+
+/// Strip a wrapping ```/```markdown code fence and any preamble before the first
+/// heading — LLMs sometimes wrap the doc in a fence, which would render literally.
+fn clean_doc(s: &str) -> String {
+    let mut t = s.trim();
+    if t.starts_with("```") {
+        if let Some(nl) = t.find('\n') {
+            t = t[nl + 1..].trim_start();
+        }
+        if let Some(idx) = t.rfind("```") {
+            t = t[..idx].trim_end();
+        }
+    }
+    if let Some(pos) = t.find("####") {
+        t = &t[pos..]; // drop any leading preamble before the first turn
+    }
+    t.trim().to_string()
+}
+
+/// Read a session's saved polished story document (empty string if none yet).
+#[tauri::command]
+fn read_story(state: State<AppState>, session_id: String) -> Result<String, String> {
+    let p = story_path(&state.audio_dir, &session_id);
+    Ok(std::fs::read_to_string(p).unwrap_or_default())
+}
+
+/// Update the living condensed transcript document, persisted to a local file.
+/// Reads the current doc from disk, folds in the new raw lines (holistic rewrite,
+/// first-person), writes it back, and returns the new doc. The FILE is the source
+/// of truth — the UI renders what's on disk.
+#[tauri::command]
+async fn polish_doc(
+    state: State<'_, AppState>,
+    session_id: String,
+    raw: String,
+) -> Result<String, String> {
+    let raw = raw.trim().to_string();
+    let path = story_path(&state.audio_dir, &session_id);
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if raw.is_empty() {
+        return Ok(current);
+    }
+    let s = state.settings.lock().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let info = claude::detect(opt(&s.claude_path)).map_err(|e| e.to_string())?;
+        let cur = if current.trim().is_empty() {
+            "(empty — start fresh)".to_string()
+        } else {
+            current.trim().to_string()
+        };
+        let prompt =
+            format!("{POLISH_PROMPT}\nCURRENT DOCUMENT:\n{cur}\n\nNEW RAW LINES:\n{raw}\n");
+        let raw_out = claude::run_prompt(&info.path, "haiku", &prompt)
+            .map_err(|e| format!("{e:#}"))?;
+        let out = clean_doc(&raw_out);
+        log::info!("[polish] in {} raw line(s) → {} char doc", raw.lines().count(), out.len());
+        // Only persist a real document (guard against conversational replies).
+        if out.contains("####") || current.trim().is_empty() {
+            std::fs::write(&path, &out).map_err(|e| format!("write story: {e}"))?;
+            Ok(out)
+        } else {
+            log::warn!("[polish] non-doc reply, kept prior: {:.120}", out);
+            Ok(current) // keep the prior doc
+        }
+    })
+    .await
+    .map_err(|e| format!("polish task failed: {e}"))?
+}
+
 /// Live, concise in-meeting copilot pass (the "Update" button). Reads the
 /// transcript so far and runs the agent (agent.md persona) for an actionable note.
 #[tauri::command]
@@ -528,6 +629,214 @@ fn delete_session(state: State<AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---- Speaker naming from frames (diarization × vision fusion) ----
+
+#[derive(serde::Deserialize)]
+struct NameItem {
+    label: String,
+    frame: String,
+}
+#[derive(Serialize)]
+struct FrameRef {
+    ms: u64,
+    path: String,
+}
+#[derive(Serialize)]
+struct NameResult {
+    label: String,
+    name: String,
+}
+
+#[tauri::command]
+fn list_frames(state: State<AppState>, session_id: String) -> Result<Vec<FrameRef>, String> {
+    let dir = state.audio_dir.join(format!("{session_id}-frames"));
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(ms) = name.strip_suffix(".jpg").and_then(|s| s.parse::<u64>().ok()) {
+                v.push(FrameRef {
+                    ms,
+                    path: e.path().to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+    v.sort_by_key(|f| f.ms);
+    Ok(v)
+}
+
+/// All display captures for one moment: the main `<ms>.jpg` plus any
+/// per-display siblings `<ms>-d2.jpg`, `<ms>-d3.jpg`, … (multi-monitor setups).
+fn sibling_frames(main: &Path) -> Vec<PathBuf> {
+    let mut out = vec![main.to_path_buf()];
+    if let (Some(stem), Some(dir)) =
+        (main.file_stem().and_then(|s| s.to_str()), main.parent())
+    {
+        let prefix = format!("{stem}-d");
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut sibs: Vec<PathBuf> = rd
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.starts_with(&prefix) && n.ends_with(".jpg")
+                })
+                .map(|e| e.path())
+                .collect();
+            sibs.sort();
+            out.extend(sibs);
+        }
+    }
+    out
+}
+
+/// Split a frame into overlapping 2×2 quadrant tiles so on-tile name labels
+/// survive the vision Read tool's downscale. Returns the saved tile paths, or
+/// the original frame if it's small or anything fails. ~20% overlap means a
+/// label cut by one seam still appears whole in a neighbouring tile.
+fn tile_frame(src: &Path, out_dir: &Path, stem: &str) -> Vec<PathBuf> {
+    let img = match image::open(src) {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("[name] tile open {} failed: {e}", src.display());
+            return vec![src.to_path_buf()];
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    if w < 1600 && h < 1600 {
+        return vec![src.to_path_buf()]; // already legible whole
+    }
+    std::fs::create_dir_all(out_dir).ok();
+    // Adaptive grid: aim for ~1500px tiles so each survives the vision Read
+    // tool's ~1568px downscale near-1:1 (keeps small gallery name labels sharp).
+    // Big 4K screens get a finer grid; tiles overlap ~30% so a label split by a
+    // seam still appears whole somewhere.
+    let cols = ((w as f32 / 1500.0).round() as u32).clamp(1, 4);
+    let rows = ((h as f32 / 1500.0).round() as u32).clamp(1, 4);
+    let tw = ((w as f32 / cols as f32) * 1.30).min(w as f32) as u32;
+    let th = ((h as f32 / rows as f32) * 1.30).min(h as f32) as u32;
+    let pos = |i: u32, n: u32, span: u32, tile: u32| -> u32 {
+        if n <= 1 { 0 } else { ((span - tile) as f32 * (i as f32 / (n - 1) as f32)) as u32 }
+    };
+    let mut out = Vec::new();
+    let mut idx = 0;
+    for r in 0..rows {
+        for c in 0..cols {
+            let x = pos(c, cols, w, tw);
+            let y = pos(r, rows, h, th);
+            let tile = img.crop_imm(x, y, tw, th);
+            let p = out_dir.join(format!("{stem}-{idx}.jpg"));
+            if tile.save(&p).is_ok() {
+                out.push(p);
+            }
+            idx += 1;
+        }
+    }
+    if out.is_empty() {
+        vec![src.to_path_buf()]
+    } else {
+        out
+    }
+}
+
+/// Async wrapper: grab settings on the calling thread, then run the blocking
+/// Claude vision call on a worker so the webview/main thread never freezes.
+#[tauri::command]
+async fn name_speakers(
+    state: State<'_, AppState>,
+    items: Vec<NameItem>,
+) -> Result<Vec<NameResult>, String> {
+    if items.is_empty() {
+        return Ok(vec![]);
+    }
+    let s = state.settings.lock().clone();
+    tauri::async_runtime::spawn_blocking(move || name_speakers_blocking(s, items))
+        .await
+        .map_err(|e| format!("name task failed: {e}"))?
+}
+
+fn name_speakers_blocking(s: Settings, items: Vec<NameItem>) -> Result<Vec<NameResult>, String> {
+    let info = claude::detect(opt(&s.claude_path)).map_err(|e| e.to_string())?;
+    let frames_dir = Path::new(&items[0].frame)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "bad frame path".to_string())?;
+
+    // Tile each frame into overlapping quadrants so small Zoom/Meet name labels
+    // survive the vision Read tool's downscale (full-screen frames are ~3456px,
+    // downscaled to ~1568px → tiny labels become illegible; tiles ~stay sharp).
+    let tiles_dir = frames_dir.join(".tiles");
+    std::fs::remove_dir_all(&tiles_dir).ok();
+    let mut prompt = String::from(
+        "These are screenshots from a video call (Zoom / Google Meet / Teams). Each speaker's \
+         screenshot is split into overlapping quadrant tiles so small text stays legible — Read \
+         ALL of a label's tiles to reconstruct the full screen. For each label, identify the NAME \
+         of the ACTIVE speaker: the person whose video tile is highlighted with a speaking border \
+         at that moment (read the name label on that tile). If you cannot tell, answer UNKNOWN.\n\
+         Reply with EXACTLY one line per label, formatted `Label: Name` — nothing else.\n\n",
+    );
+    for (i, it) in items.iter().enumerate() {
+        // One capture may span several displays (`<ms>.jpg` + `<ms>-d2.jpg`…);
+        // the call could be on any of them, so tile and pass them all.
+        let screens = sibling_frames(Path::new(&it.frame));
+        let mut tiles = Vec::new();
+        for (j, sc) in screens.iter().enumerate() {
+            tiles.extend(tile_frame(sc, &tiles_dir, &format!("s{i}_{j}")));
+        }
+        prompt.push_str(&format!(
+            "{} — tiles from {} screen(s) at one moment, each split into quadrants \
+             (the active speaker is somewhere across these):\n",
+            it.label,
+            screens.len()
+        ));
+        for t in &tiles {
+            prompt.push_str(&format!("  {}\n", t.display()));
+        }
+    }
+    let model = if s.claude_model.is_empty() {
+        "sonnet".to_string()
+    } else {
+        s.claude_model.clone()
+    };
+    log::info!(
+        "[name] {} speaker(s), frames_dir={}, model={}",
+        items.len(),
+        frames_dir.display(),
+        model
+    );
+    let out = claude::run_sync(&info.path, &frames_dir, &frames_dir, &model, &prompt)
+        .map_err(|e| {
+            log::warn!("[name] claude vision failed: {e:#}");
+            format!("{e:#}")
+        })?;
+    log::info!("[name] claude output:\n{}", out.trim());
+
+    // Tolerant parse: for each label, find a line that mentions it and take the
+    // text after the label (handles `**Speaker 1:** Name`, `- Speaker 1 — Name`, etc.).
+    let mut res = Vec::new();
+    for it in &items {
+        for line in out.lines() {
+            let clean = line.replace(['*', '#', '`'], "");
+            let clean = clean.trim().trim_start_matches("- ").trim();
+            if let Some(rest) = clean.strip_prefix(it.label.as_str()) {
+                let name = rest
+                    .trim_start_matches([':', ' ', '-', '—', '\t'])
+                    .trim()
+                    .to_string();
+                if !name.is_empty() {
+                    res.push(NameResult {
+                        label: it.label.clone(),
+                        name,
+                    });
+                }
+                break;
+            }
+        }
+    }
+    log::info!("[name] parsed {} name(s)", res.len());
+    Ok(res)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Logs go to stderr; control verbosity with RUST_LOG (e.g. RUST_LOG=info).
@@ -578,6 +887,8 @@ pub fn run() {
             process_meeting,
             update_meeting,
             story_update,
+            polish_doc,
+            read_story,
             chat_send,
             get_chat,
             open_in_obsidian,
@@ -586,6 +897,8 @@ pub fn run() {
             read_note,
             write_note,
             resolve_wikilink,
+            list_frames,
+            name_speakers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

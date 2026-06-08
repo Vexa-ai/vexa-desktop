@@ -34,6 +34,10 @@ pub struct Settings {
     pub capture_frames: bool,
     /// Seconds between captured frames.
     pub frame_interval_secs: u64,
+    /// Real-time speaker diarization of system audio (Speaker 1/2/3…).
+    pub diarize: bool,
+    /// Override path to the diarizer tool dir (else auto-detected).
+    pub diarizer_dir: String,
 }
 
 impl Default for Settings {
@@ -50,6 +54,8 @@ impl Default for Settings {
             max_budget_usd: None,
             capture_frames: true,
             frame_interval_secs: 5,
+            diarize: true,
+            diarizer_dir: String::new(),
         }
     }
 }

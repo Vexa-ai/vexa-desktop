@@ -8,7 +8,7 @@
 //! `session_id` is persisted so chat follow-ups can `--resume`.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
@@ -126,6 +126,79 @@ pub fn spawn_run(app: AppHandle, opts: RunOpts) {
         .ok();
 }
 
+/// Strip env that would hijack the spawned `claude`'s auth/endpoint so it always
+/// uses the user's own Claude Code login (keychain/OAuth). Critical when the app
+/// is launched from a shell that itself runs inside Claude Code.
+fn scrub_env(cmd: &mut Command) {
+    for (k, _) in std::env::vars() {
+        let up = k.to_uppercase();
+        if up.starts_with("CLAUDE")
+            || up == "ANTHROPIC_BASE_URL"
+            || up == "ANTHROPIC_API_KEY"
+            || up == "ANTHROPIC_AUTH_TOKEN"
+            || up == "ANTHROPIC_MODEL"
+            || up == "ANTHROPIC_SMALL_FAST_MODEL"
+        {
+            cmd.env_remove(k);
+        }
+    }
+}
+
+/// One-shot Claude call (text output) that can Read images — used for speaker
+/// naming from frames. Returns stdout.
+pub fn run_sync(
+    claude_path: &str,
+    cwd: &Path,
+    add_dir: &Path,
+    model: &str,
+    prompt: &str,
+) -> Result<String> {
+    let mut cmd = Command::new(claude_path);
+    cmd.current_dir(cwd)
+        .arg("-p")
+        .arg("--add-dir")
+        .arg(add_dir)
+        .arg("--allowedTools")
+        .arg("Read")
+        .arg("--model")
+        .arg(model)
+        .arg(prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    scrub_env(&mut cmd);
+    let out = cmd.output().context("run claude (vision)")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "claude failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Minimal one-shot text completion: `claude -p --model <m> <prompt>` with no
+/// tools or dir access. Used for transcript polishing (text in → markdown out).
+pub fn run_prompt(claude_path: &str, model: &str, prompt: &str) -> Result<String> {
+    let mut cmd = Command::new(claude_path);
+    cmd.arg("-p")
+        .arg("--model")
+        .arg(model)
+        .arg(prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    scrub_env(&mut cmd);
+    let out = cmd.output().context("run claude (polish)")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "claude failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
     let mut cmd = Command::new(&opts.claude_path);
     cmd.current_dir(&opts.vault)
@@ -156,6 +229,7 @@ fn run(app: &AppHandle, opts: &RunOpts) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    scrub_env(&mut cmd);
 
     let mut child = cmd.spawn().with_context(|| {
         format!("failed to launch claude at {}", opts.claude_path)

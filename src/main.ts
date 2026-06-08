@@ -81,13 +81,18 @@ let timerHandle: number | undefined;
 let appSettings: Settings | null = null; // last-loaded settings (preserve on save)
 let streamingMsgEl: HTMLElement | null = null; // current streaming assistant bubble
 let claudeBusy = false;
-// Live Story tab (a living, attributed meeting report extended from a sliding window)
-let storyText = "";
-let storyBusy = false;
-let storyTimer: number | undefined;
-let storyReportPath = ""; // absolute path to the living report file
-let lastStoryEnd = 0; // transcript seconds already folded into the report (window cursor)
-const STORY_INTERVAL_MS = 25000; // auto-refresh cadence while recording
+// Live polishing: raw attributed turns get rewritten into a clean, attributed,
+// entity-highlighted "story" in place (one merged window).
+interface TurnLog { speaker: string; source: string; start: number; end: number; text: string; el: HTMLElement }
+let turnLog: TurnLog[] = []; // source of truth for each rendered raw turn
+let lastLog: TurnLog | null = null; // mirrors lastBubble grouping
+let polishedCount = 0; // prefix of turnLog already folded into the doc
+let polishedDoc = ""; // the living condensed markdown document (whole-doc edits)
+let polishBusy = false;
+let polishTimer: number | undefined;
+const POLISH_INTERVAL_MS = 12000; // auto-polish cadence while recording
+const POLISH_SETTLE_S = 4; // leave the live tail (newer than this) raw
+const POLISH_MIN_TURNS = 1; // polish as soon as a turn settles
 // Notes vault workspace
 let vaultPath = "";
 let currentNotePath: string | null = null;
@@ -97,6 +102,7 @@ let crepe: Crepe | null = null; // active Milkdown rich editor
 
 // ---- DOM helpers ----
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const scrollStream = () => { const s = $("stream"); if (s) s.scrollTop = s.scrollHeight; };
 const fmtTime = (s: number) => {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
@@ -114,18 +120,46 @@ function banner(msg: string, kind: "info" | "error" = "info") {
 // Consecutive segments from the same source are merged into one bubble (like
 // Granola), breaking only when the source switches or after a long pause.
 const GROUP_GAP = 30; // seconds; larger gaps start a new bubble
-let lastBubble: { bubbleEl: HTMLElement; source: string; end: number } | null = null;
+let lastBubble: { bubbleEl: HTMLElement; source: string; who: string; end: number } | null = null;
+// Rendered mic bubbles, kept so we can retroactively remove echoes once the
+// (later-arriving) system transcript reveals them as bleed.
+let micRows: { start: number; end: number; text: string; el: HTMLElement }[] = [];
+
+// ---- Speaker diarization labels (system audio → Speaker 1/2/3…) ----
+interface DiarLabelEvent { session: string; speaker_id: string; start: number; end: number }
+let diarLabels: { speakerId: string; start: number; end: number }[] = [];
+const speakerNums = new Map<string, number>(); // speaker_id → display number (first-seen order)
+const speakerNames = new Map<number, string>(); // display number → real name (from frames)
+function speakerNumFor(start: number, end: number): number | null {
+  let best: { speakerId: string } | null = null;
+  let bestOv = 0;
+  for (const d of diarLabels) {
+    const ov = Math.min(end, d.end) - Math.max(start, d.start);
+    if (ov > bestOv) { bestOv = ov; best = d; }
+  }
+  return best && bestOv > 0 ? speakerNums.get(best.speakerId) ?? null : null;
+}
+function speakerDisplay(num: number | null): string {
+  if (num == null) return "Others";
+  return speakerNames.get(num) ?? `Speaker ${num}`;
+}
+function applySpeakerNames() {
+  document.querySelectorAll<HTMLElement>("#transcript .seg-row[data-speaker]").forEach((row) => {
+    const tag = row.querySelector(".speaker-tag");
+    if (tag) tag.textContent = speakerDisplay(Number(row.dataset.speaker));
+  });
+}
 
 // ---- Cross-source dedup (echo / speaker bleed) ----
-// On speakers the mic re-hears system audio, so both pipelines transcribe the
-// same words. Rather than fragile incremental dedup (which depends on which copy
-// arrives first), we keep ALL received segments and re-derive the displayed
-// transcript on every update: dedupe the full set, then render. This is
-// ordering-independent, so a late-arriving system twin still removes its mic echo.
-const DUP_WINDOW = 8; // seconds: max start-time gap when matching a mic↔system twin
+// On speakers the mic re-hears system audio. We render INCREMENTALLY (append
+// only, no full rebuild) with a short hold-back, deciding once per segment
+// whether it's a mic echo of the system stream — stable and smooth.
+const DUP_WINDOW = 8; // seconds: start-time gap when matching a mic↔system twin (saved view)
+const HOLDBACK_MS = 2600; // wait this long before committing a segment (twin likely arrived)
 interface Seg { start: number; end: number; text: string; source: string }
-let liveSegs: Seg[] = []; // everything received this recording (both sources)
-let renderTimer: number | undefined;
+let pending: (Seg & { recvAt: number })[] = [];
+let systemNorm = ""; // accumulated normalized system text, for echo matching
+let flushTimer: number | undefined;
 
 function normText(s: string): string {
   return s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
@@ -168,74 +202,268 @@ function dedupeLoaded(segs: Seg[]): Seg[] {
   }
   return out;
 }
-// Re-render the whole live transcript from the deduped, grouped segment set.
-function renderLive() {
-  const segs = dedupeLoaded(liveSegs);
-  const t = $("transcript");
-  t.innerHTML = "";
-  lastBubble = null;
-  if (!segs.length) {
-    t.innerHTML = `<div class="empty">Listening… speak and transcripts will appear here.</div>`;
-    return;
+// Is this mic segment just the speakers bleeding back in (echo of system audio)?
+function isMicEcho(seg: Seg): boolean {
+  if (seg.source !== "mic") return false;
+  const micNorm = normText(seg.text);
+  const micWords = micNorm.split(" ").filter(Boolean);
+  if (micWords.length < 2) return false;
+  // Exact phrase appears in the system stream → definitely echo.
+  if (systemNorm.includes(` ${micNorm} `)) return true;
+  // Most of the mic phrase's words appear in the system stream → echo.
+  const sys = new Set(systemNorm.split(" ").filter(Boolean));
+  const hit = micWords.filter((w) => sys.has(w)).length;
+  return hit / micWords.length >= 0.6;
+}
+// Append matured (held-back) segments incrementally — no full rebuild, no churn.
+function flushPending(force = false) {
+  const now = performance.now();
+  const matured = pending.filter((p) => force || now - p.recvAt >= HOLDBACK_MS);
+  if (matured.length) {
+    const set = new Set(matured);
+    pending = pending.filter((p) => !set.has(p));
+    matured.sort((a, b) => a.start - b.start);
+    for (const seg of matured) if (!isMicEcho(seg)) appendSegment(seg);
   }
-  for (const seg of segs) appendSegment(seg);
+  if (!pending.length && flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = undefined;
+  }
 }
 function pushLive(seg: Seg) {
-  liveSegs.push(seg);
-  if (!renderTimer) {
-    renderTimer = window.setTimeout(() => {
-      renderTimer = undefined;
-      renderLive();
-    }, 350);
+  if (seg.source === "system") {
+    systemNorm += ` ${normText(seg.text)} `;
+    pruneMicEchoes(); // new system text may reveal earlier mic bubbles as echo
   }
+  pending.push({ ...seg, recvAt: performance.now() });
+  if (!flushTimer) flushTimer = window.setInterval(() => flushPending(), 300);
 }
 
 function clearTranscript(placeholder?: string) {
   const t = $("transcript");
   t.innerHTML = placeholder ? `<div class="empty">${placeholder}</div>` : "";
   lastBubble = null;
-  liveSegs = [];
-  if (renderTimer) {
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
+  micRows = [];
+  pending = [];
+  systemNorm = "";
+  diarLabels = [];
+  speakerNums.clear();
+  speakerNames.clear();
+  nameState.clear();
+  namingBusy = false;
+  lastQueueRun = 0;
+  if (queueThrottle != null) { clearTimeout(queueThrottle); queueThrottle = undefined; }
+  resetPolish();
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = undefined;
   }
 }
 
-function appendSegment(seg: {
-  start: number;
-  end: number;
-  text: string;
-  source: string;
-}) {
+function makeRow(source: string, who: string, text: string, start: number): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "seg-row";
+  const tag = source === "system" ? `<div class="speaker-tag"></div>` : "";
+  row.innerHTML =
+    `<div class="seg-ts">${fmtTime(start)}</div>${tag}` +
+    `<div class="bubble-line ${source}"><div class="bubble"></div></div>`;
+  if (source === "system") (row.querySelector(".speaker-tag") as HTMLElement).textContent = who;
+  (row.querySelector(".bubble") as HTMLElement).textContent = text;
+  return row;
+}
+// Drop already-rendered mic bubbles that a now-fuller system stream reveals as echo.
+function pruneMicEchoes() {
+  if (!micRows.length) return;
+  micRows = micRows.filter((r) => {
+    if (isMicEcho({ start: r.start, end: r.end, text: r.text, source: "mic" })) {
+      r.el.remove();
+      turnLog = turnLog.filter((e) => e.el !== r.el); // keep the polish log in sync
+      return false;
+    }
+    return true;
+  });
+}
+function appendSegment(seg: { start: number; end: number; text: string; source: string }) {
   const t = $("transcript");
   const empty = t.querySelector(".empty");
   if (empty) empty.remove();
-  const source = seg.source === "system" ? "system" : "mic";
   const text = seg.text.trim();
   if (!text) return;
 
-  // Merge into the current bubble if same source and close in time.
-  if (
-    lastBubble &&
-    lastBubble.source === source &&
-    seg.start - lastBubble.end < GROUP_GAP
-  ) {
-    lastBubble.bubbleEl.textContent = `${lastBubble.bubbleEl.textContent} ${text}`.trim();
-    lastBubble.end = seg.end;
-    t.scrollTop = t.scrollHeight;
+  if (seg.source !== "system") {
+    // Mic: don't group (so we can remove individual echoes later). Skip known echoes.
+    if (isMicEcho({ ...seg, source: "mic" })) return;
+    const row = makeRow("mic", "You", text, seg.start);
+    t.appendChild(row);
+    micRows.push({ start: seg.start, end: seg.end, text: seg.text, el: row });
+    turnLog.push({ speaker: "You", source: "mic", start: seg.start, end: seg.end, text, el: row });
+    lastBubble = null; // a mic turn breaks system grouping
+    lastLog = null;
+    scrollStream();
     return;
   }
 
-  const row = document.createElement("div");
-  row.className = "seg-row";
-  row.innerHTML =
-    `<div class="seg-ts">${fmtTime(seg.start)}</div>` +
-    `<div class="bubble-line ${source}"><div class="bubble"></div></div>`;
-  const bubbleEl = row.querySelector(".bubble") as HTMLElement;
-  bubbleEl.textContent = text;
+  // System: group consecutive same-speaker turns.
+  const num = speakerNumFor(seg.start, seg.end);
+  const who = speakerDisplay(num);
+  if (lastBubble && lastLog && lastBubble.who === who && seg.start - lastBubble.end < GROUP_GAP) {
+    lastBubble.bubbleEl.textContent = `${lastBubble.bubbleEl.textContent} ${text}`.trim();
+    lastBubble.end = seg.end;
+    lastLog.text = `${lastLog.text} ${text}`.trim();
+    lastLog.end = seg.end;
+    scrollStream();
+    return;
+  }
+  const row = makeRow("system", who, text, seg.start);
+  if (num != null) row.dataset.speaker = String(num);
   t.appendChild(row);
-  lastBubble = { bubbleEl, source, end: seg.end };
-  t.scrollTop = t.scrollHeight;
+  lastBubble = { bubbleEl: row.querySelector(".bubble") as HTMLElement, source: "system", who, end: seg.end };
+  lastLog = { speaker: who, source: "system", start: seg.start, end: seg.end, text, el: row };
+  turnLog.push(lastLog);
+  scrollStream();
+}
+// ---- Dynamic speaker naming ----
+// Goal: one Claude CLI call per *genuinely new* speaker. When a new cluster has
+// spoken enough and a screen frame exists for its moment, we name it once. A
+// named speaker is never re-checked. An UNKNOWN result only retries if that
+// speaker keeps talking (new visual info to try) — never on a bare timer — and
+// is capped. Single-flight so at most one CLI call runs at a time.
+interface NameState {
+  tries: number; // actual CLI attempts that came back UNKNOWN/failed
+  named: boolean;
+  lastCli: number; // ts of last actual CLI invocation (retry safety floor)
+  speechAtCli: number; // total speech (s) at last CLI invocation
+}
+const nameState = new Map<string, NameState>();
+let namingBusy = false;
+let lastQueueRun = 0;
+let queueThrottle: number | undefined;
+const MIN_SPEECH_S = 3; // need this much total speech before the first attempt
+const RETRY_SPEECH_DELTA_S = 8; // only retry after this much *additional* speech
+const NAME_MAX_TRIES = 3; // give up after this many unreadable CLI attempts
+const NAME_RETRY_FLOOR_MS = 20000; // and never retry the same speaker faster than this
+const FRAME_MAX_GAP_MS = 8000; // only use a frame within this of the speaking moment
+const QUEUE_THROTTLE_MS = 3000; // don't recompute the queue more often than this
+
+function nstate(sid: string): NameState {
+  let st = nameState.get(sid);
+  if (!st) { st = { tries: 0, named: false, lastCli: 0, speechAtCli: 0 }; nameState.set(sid, st); }
+  return st;
+}
+function totalSpeech(sid: string): number {
+  let s = 0;
+  for (const d of diarLabels) if (d.speakerId === sid) s += d.end - d.start;
+  return s;
+}
+function longestSpan(sid: string): { start: number; end: number } | null {
+  let best: { start: number; end: number } | null = null;
+  for (const d of diarLabels) {
+    if (d.speakerId !== sid) continue;
+    if (!best || d.end - d.start > best.end - best.start) best = { start: d.start, end: d.end };
+  }
+  return best;
+}
+// Eligible = unnamed, under the try cap, has enough speech, and (if already
+// attempted) has both waited the floor AND gained meaningful new speech.
+function eligible(sid: string, now: number): boolean {
+  const st = nstate(sid);
+  if (st.named || st.tries >= NAME_MAX_TRIES) return false;
+  const speech = totalSpeech(sid);
+  if (speech < MIN_SPEECH_S) return false;
+  if (st.tries >= 1) {
+    if (now - st.lastCli < NAME_RETRY_FLOOR_MS) return false;
+    if (speech < st.speechAtCli + RETRY_SPEECH_DELTA_S) return false; // no new info → don't spend a call
+  }
+  return true;
+}
+// Called on each diar label (and the user's manual button). Throttled so we
+// don't rescan on every single label; trailing run guarantees eventual check.
+function scheduleNaming() {
+  if (!viewSessionId) return;
+  const now = Date.now();
+  const wait = QUEUE_THROTTLE_MS - (now - lastQueueRun);
+  if (wait <= 0) {
+    lastQueueRun = now;
+    void runNamingQueue();
+  } else if (queueThrottle == null) {
+    queueThrottle = window.setTimeout(() => {
+      queueThrottle = undefined;
+      lastQueueRun = Date.now();
+      void runNamingQueue();
+    }, wait);
+  }
+}
+async function runNamingQueue() {
+  if (namingBusy) return;
+  namingBusy = true;
+  try {
+    const triedThisPass = new Set<string>(); // avoid re-picking a deferred speaker → no infinite loop
+    while (true) {
+      const now = Date.now();
+      let next: string | null = null;
+      for (const [sid] of speakerNums) {
+        if (!triedThisPass.has(sid) && eligible(sid, now)) { next = sid; break; }
+      }
+      if (!next) break;
+      triedThisPass.add(next);
+      await nameOne(next);
+    }
+  } finally {
+    namingBusy = false;
+  }
+}
+async function nameOne(sid: string) {
+  const st = nstate(sid);
+  const num = speakerNums.get(sid);
+  if (num == null) return;
+  const span = longestSpan(sid);
+  if (!span) return; // nothing usable yet — cheap defer, no CLI, no state change
+  let frames: { ms: number; path: string }[] = [];
+  try {
+    frames = await invoke<{ ms: number; path: string }[]>("list_frames", { sessionId: viewSessionId });
+  } catch { /* none */ }
+  if (!frames.length) return; // frames not captured yet → defer (no CLI)
+  const midMs = ((span.start + span.end) / 2) * 1000;
+  const frame = frames.reduce((a, b) => (Math.abs(b.ms - midMs) < Math.abs(a.ms - midMs) ? b : a));
+  if (Math.abs(frame.ms - midMs) > FRAME_MAX_GAP_MS) return; // wait for a closer frame → defer (no CLI)
+  // Committing to an actual CLI call now.
+  const label = `Speaker ${num}`;
+  st.lastCli = Date.now();
+  st.speechAtCli = totalSpeech(sid);
+  try {
+    const res = await invoke<{ label: string; name: string }[]>("name_speakers", {
+      items: [{ label, frame: frame.path }],
+    });
+    const r = res.find((x) => x.label === label);
+    if (r && r.name && r.name.toUpperCase() !== "UNKNOWN") {
+      speakerNames.set(num, r.name);
+      st.named = true;
+      applySpeakerNames();
+      banner(`Identified ${label} → ${r.name}.`, "info");
+      setTimeout(() => banner(""), 2500);
+    } else {
+      st.tries++;
+    }
+  } catch (e) {
+    st.tries++;
+    console.warn("[name] failed", e);
+  }
+}
+// Manual fallback: force an immediate pass over all still-unnamed speakers.
+function nameNow() {
+  if (!viewSessionId) return;
+  if (!speakerNums.size) {
+    banner("No speakers detected yet — record with system audio first.", "info");
+    return;
+  }
+  for (const [sid] of speakerNums) {
+    const st = nstate(sid);
+    if (!st.named) { st.tries = 0; st.lastCli = 0; st.speechAtCli = 0; } // fresh attempt now
+  }
+  banner("Naming speakers from screen frames…", "info");
+  setTimeout(() => banner(""), 2500);
+  lastQueueRun = Date.now();
+  void runNamingQueue();
 }
 
 // ---- Data loading ----
@@ -269,12 +497,14 @@ async function selectSession(s: SessionRow) {
   setChatStatus("");
   await loadChat(s.id);
   setBusy(claudeBusy); // refresh Process button enabled state for the new session
-  // Saved session: load its existing report (cursor at end → ↻ only adds new).
-  stopStoryAuto();
-  resetStory();
-  lastStoryEnd = s.duration_secs ?? 0;
-  storyUpdate(); // since = end → ran:false → loads the saved report file if any
-  switchTab("transcript");
+  // Saved session: show its raw transcript + load the polished story from disk.
+  stopPolishAuto();
+  try {
+    polishedDoc = (await invoke<string>("read_story", { sessionId: s.id })) || "";
+  } catch {
+    polishedDoc = "";
+  }
+  if (polishedDoc) renderPolished();
   await refreshSessions();
 }
 
@@ -293,10 +523,9 @@ async function startRecording() {
     $("session-title").textContent = "Recording…";
     $("session-meta").textContent = new Date().toLocaleString();
     clearTranscript("Listening… speak and transcripts will appear here.");
-    resetStory();
     setRecordingUI(true);
     startTimer();
-    startStoryAuto(); // self-updating live story while recording
+    startPolishAuto(); // raw transcript is polished into the story while recording
   } catch (e) {
     banner(`Could not start recording: ${e}`, "error");
   }
@@ -311,13 +540,9 @@ async function stopRecording() {
   recording = false;
   setRecordingUI(false);
   stopTimer();
-  stopStoryAuto();
-  if (renderTimer) {
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
-  }
-  renderLive(); // final pass over the full deduped set
-  storyUpdate(); // one final story refresh
+  stopPolishAuto();
+  flushPending(true); // commit any held-back segments immediately
+  setTimeout(() => polishTick(true), 400); // final pass: polish everything remaining
   await refreshSessions();
 }
 
@@ -775,43 +1000,36 @@ async function closeVault() {
   $("vault-view").classList.add("hidden");
 }
 
-// ---- Live Story tab ----
-function setStoryStatus(text: string, kind: "" | "working" | "error" = "") {
-  const el = $("story-status");
-  el.textContent = text;
-  el.className = `story-status ${kind}`;
+// ---- Live transcript polishing ----
+function resetPolish() {
+  turnLog = [];
+  lastLog = null;
+  polishedCount = 0;
+  polishedDoc = "";
+  polishBusy = false;
+  const pol = document.getElementById("polished");
+  if (pol) pol.innerHTML = "";
 }
-function resetStory() {
-  storyText = "";
-  storyReportPath = "";
-  lastStoryEnd = 0;
-  $("story-body").innerHTML =
-    `<div class="empty">A living, attributed meeting report builds itself here while you record. Entities are clickable.</div>`;
+// Re-render the whole living document (it is reconsidered holistically each pass).
+function renderPolished() {
+  const pol = $("polished");
+  pol.innerHTML = renderMarkdown(polishedDoc);
+  attachResearchLinks(pol);
 }
-async function loadStoryFromFile() {
-  if (!storyReportPath) return;
-  try {
-    const md = await invoke<string>("read_note", { path: storyReportPath });
-    renderStory(md);
-  } catch {
-    /* report not created yet */
-  }
-}
-function attachStoryLinks(el: HTMLElement) {
+// Make [[entities]] in polished text clickable → research via the Assistant.
+function attachResearchLinks(el: HTMLElement) {
   el.querySelectorAll("a").forEach((a) => {
     const href = a.getAttribute("href") || "";
     if (href.startsWith("#wikilink:")) {
       const name = decodeURIComponent(href.slice("#wikilink:".length));
-      a.classList.add("wikilink");
-      a.addEventListener("click", async (ev) => {
+      a.classList.add("kw");
+      a.addEventListener("click", (ev) => {
         ev.preventDefault();
-        const p = await invoke<string | null>("resolve_wikilink", { name });
-        if (p) openVault(p);
-        else
-          runAgent(
-            `Research "${name}" (mentioned in this meeting) and create the right entity in the vault with a concise summary and links.`,
-            `Research ${name}`,
-          );
+        runAgent(
+          `Research "${name}" (mentioned in this meeting) and reply with concise findings. ` +
+            `If it's a person, company, or product, create or update its entity note in the vault with links.`,
+          `Research ${name}`,
+        );
       });
     } else if (/^https?:/.test(href)) {
       a.addEventListener("click", (ev) => {
@@ -821,50 +1039,60 @@ function attachStoryLinks(el: HTMLElement) {
     }
   });
 }
-function renderStory(md: string) {
-  storyText = md;
-  const b = $("story-body");
-  b.innerHTML = renderMarkdown(md);
-  attachStoryLinks(b);
+// Current display label for a logged turn (picks up names resolved since render).
+function turnSpeaker(e: TurnLog): string {
+  if (e.source !== "system") return "You";
+  const ds = e.el.dataset.speaker;
+  return ds != null ? speakerDisplay(Number(ds)) : e.speaker;
 }
-async function storyUpdate() {
-  if (!viewSessionId || storyBusy) return;
-  storyBusy = true;
-  setStoryStatus("Updating report…", "working");
+// Fold the settled (non-tail) raw turns into the polished story. `flush` ignores
+// the settle window (used on stop) and polishes everything remaining.
+async function polishTick(flush = false) {
+  if (!viewSessionId || polishBusy) return;
+  const tail = turnLog.length ? turnLog[turnLog.length - 1].end : 0;
+  let upto = polishedCount;
+  while (
+    upto < turnLog.length &&
+    (flush || turnLog[upto].end <= tail - POLISH_SETTLE_S)
+  )
+    upto++;
+  const batch = turnLog.slice(polishedCount, upto);
+  if (batch.length < (flush ? 1 : POLISH_MIN_TURNS)) return;
+  polishBusy = true;
+  $("story-live").classList.remove("hidden");
+  const raw = batch
+    .map((e) => `${turnSpeaker(e)} [${fmtTime(e.start)}]: ${e.text}`)
+    .join("\n");
   try {
-    const ref = await invoke<{ report_path: string; processed_until: number; ran: boolean }>(
-      "story_update",
-      { sessionId: viewSessionId, sinceSecs: lastStoryEnd },
-    );
-    storyReportPath = ref.report_path;
-    lastStoryEnd = ref.processed_until;
-    if (!ref.ran) {
-      // Nothing new this tick — just show the existing report.
-      storyBusy = false;
-      setStoryStatus(recording ? "Up to date." : "No new transcript.");
-      if (!storyText) await loadStoryFromFile();
+    // Whole-document edit, file-backed: the backend reads the saved doc, folds in
+    // the new raw lines (holistic, first-person rewrite), writes it, returns it.
+    const md = (await invoke<string>("polish_doc", { sessionId: viewSessionId, raw })).trim();
+    if (md && (md.includes("####") || !polishedDoc)) {
+      polishedDoc = md;
+      renderPolished();
+      for (const e of batch) e.el.remove(); // drop the raw rows now folded in
+      polishedCount = upto;
+      const empty = $("transcript").querySelector(".empty");
+      if (empty && !turnLog.slice(polishedCount).length) empty.remove();
+      scrollStream();
+    } else {
+      console.warn("[polish] discarded non-doc reply");
     }
-    // If it ran, the report file is read on the story result event.
   } catch (e) {
-    storyBusy = false;
-    setStoryStatus(`${e}`, "error");
+    console.warn("[polish] failed", e);
+  } finally {
+    polishBusy = false;
+    if (!recording) $("story-live").classList.add("hidden");
   }
 }
-function switchTab(tab: "transcript" | "story") {
-  $("tab-transcript").classList.toggle("active", tab === "transcript");
-  $("tab-story").classList.toggle("active", tab === "story");
-  $("transcript-pane").classList.toggle("hidden", tab !== "transcript");
-  $("story-pane").classList.toggle("hidden", tab !== "story");
-  if (tab === "story" && !storyText && !storyBusy && viewSessionId) storyUpdate();
+function startPolishAuto() {
+  stopPolishAuto();
+  polishTimer = window.setInterval(() => polishTick(), POLISH_INTERVAL_MS);
 }
-function startStoryAuto() {
-  stopStoryAuto();
-  storyTimer = window.setInterval(() => storyUpdate(), STORY_INTERVAL_MS);
-}
-function stopStoryAuto() {
-  if (storyTimer) {
-    clearInterval(storyTimer);
-    storyTimer = undefined;
+function stopPolishAuto() {
+  if (polishTimer) {
+    clearInterval(polishTimer);
+    polishTimer = undefined;
   }
 }
 
@@ -872,6 +1100,14 @@ function stopStoryAuto() {
 async function setupEvents() {
   await listen<SegmentEvent>("transcript-segment", (e) => {
     if (e.payload.session_id === viewSessionId) pushLive(e.payload);
+  });
+  await listen<DiarLabelEvent>("diar-label", (e) => {
+    if (e.payload.session !== viewSessionId) return;
+    if (!speakerNums.has(e.payload.speaker_id)) {
+      speakerNums.set(e.payload.speaker_id, speakerNums.size + 1);
+    }
+    diarLabels.push({ speakerId: e.payload.speaker_id, start: e.payload.start, end: e.payload.end });
+    scheduleNaming(); // dynamically name new/under-named speakers in the background
   });
   await listen<StartedEvent>("recording-started", (e) => {
     const { active_sources, warnings } = e.payload;
@@ -915,17 +1151,7 @@ async function setupEvents() {
   });
   await listen<ResultEvent>("claude-result", (e) => {
     if (e.payload.session !== viewSessionId) return;
-    if (e.payload.kind === "story") {
-      storyBusy = false;
-      const md = (e.payload.text || "").trim();
-      if (md) {
-        renderStory(md);
-        // Persist the updated report so it lives in the vault / Obsidian.
-        if (storyReportPath) invoke("write_note", { path: storyReportPath, content: md }).catch(() => {});
-      }
-      setStoryStatus(recording ? "Auto-updating while recording (fast model)." : "Updated.");
-      return;
-    }
+    if (e.payload.kind === "story") return; // story tab removed; ignore
     if (streamingMsgEl) {
       renderAssistant(streamingMsgEl, streamingMsgEl.textContent || e.payload.text);
     } else if (e.payload.text) {
@@ -939,11 +1165,7 @@ async function setupEvents() {
   });
   await listen<ClaudeErrEvent>("claude-error", (e) => {
     if (e.payload.session !== viewSessionId) return;
-    if (e.payload.kind === "story") {
-      storyBusy = false;
-      setStoryStatus(`Story error: ${e.payload.message}`, "error");
-      return;
-    }
+    if (e.payload.kind === "story") return; // story tab removed; ignore
     streamingMsgEl = null;
     setBusy(false);
     setChatStatus(`Claude error: ${e.payload.message}`, "error");
@@ -972,9 +1194,7 @@ function wireUI() {
   $("update-btn").onclick = updateMeeting;
   $("process-btn").onclick = processMeeting;
   $("chat-send").onclick = sendChat;
-  $("tab-transcript").onclick = () => switchTab("transcript");
-  $("tab-story").onclick = () => switchTab("story");
-  $("story-refresh").onclick = () => storyUpdate();
+  $("name-speakers").onclick = () => nameNow();
   $("vault-choose").onclick = chooseVault;
   $("open-notes").onclick = () => openVault();
   $("vault-close").onclick = closeVault;

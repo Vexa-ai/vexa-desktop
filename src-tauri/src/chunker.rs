@@ -19,9 +19,9 @@ use crate::audio::resample::TARGET_RATE;
 use crate::audio::Source;
 
 const SR: usize = TARGET_RATE as usize;
-const MIN_CHUNK: usize = SR * 2; // 2 s
-const MAX_CHUNK: usize = SR * 12; // 12 s
-const SILENCE_TAIL: usize = SR / 2; // 0.5 s of trailing quiet triggers a cut
+const MIN_CHUNK: usize = SR * 3 / 2; // 1.5 s — lower latency on short utterances
+const MAX_CHUNK: usize = SR * 8; // 8 s — bounds worst-case latency on monologues
+const SILENCE_TAIL: usize = SR * 2 / 5; // 0.4 s of trailing quiet triggers a cut
 const SILENCE_RMS: f32 = 0.012; // below this is "quiet"
 const DROP_RMS: f32 = 0.006; // chunks quieter than this aren't transcribed
 

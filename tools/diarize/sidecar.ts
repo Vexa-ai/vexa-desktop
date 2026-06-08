@@ -16,6 +16,9 @@ const FRAME = 4096; // samples (matches the browser ScriptProcessor cadence)
 async function main() {
   process.stdout.on("error", () => process.exit(0)); // EPIPE when the app closes the pipe
   const diarizer = await OnnxLocalDiarizer.create({
+    // Commit a label sooner on long monologues (10 s default → 6 s) to cut
+    // speaker-label latency; change-point detection still splits on turn changes.
+    maxUtteranceMs: 6000,
     onCommit: (e: CommitEvent) => {
       process.stdout.write(
         JSON.stringify({ speakerId: e.speakerId, startMs: e.tStartMs, endMs: e.tEndMs }) + "\n",

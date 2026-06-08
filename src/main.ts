@@ -90,8 +90,8 @@ let polishedCount = 0; // prefix of turnLog already folded into the doc
 let polishedDoc = ""; // the living condensed markdown document (whole-doc edits)
 let polishBusy = false;
 let polishTimer: number | undefined;
-const POLISH_INTERVAL_MS = 12000; // auto-polish cadence while recording
-const POLISH_SETTLE_S = 4; // leave the live tail (newer than this) raw
+const POLISH_INTERVAL_MS = 8000; // auto-polish cadence while recording
+const POLISH_SETTLE_S = 2.5; // leave the live tail (newer than this) raw
 const POLISH_MIN_TURNS = 1; // polish as soon as a turn settles
 // Notes vault workspace
 let vaultPath = "";
@@ -149,13 +149,26 @@ function applySpeakerNames() {
     if (tag) tag.textContent = speakerDisplay(Number(row.dataset.speaker));
   });
 }
+// Backfill speaker labels on already-rendered system rows as diarization commits
+// catch up (lets us show segments fast without waiting for their diar label).
+function reattributeSystemRows() {
+  for (const e of turnLog) {
+    if (e.source !== "system" || !e.el.isConnected) continue;
+    const num = speakerNumFor(e.start, e.end);
+    if (num == null || e.el.dataset.speaker === String(num)) continue;
+    e.el.dataset.speaker = String(num);
+    const tag = e.el.querySelector(".speaker-tag");
+    if (tag) tag.textContent = speakerDisplay(num);
+    e.speaker = speakerDisplay(num); // keep the polish log in sync
+  }
+}
 
 // ---- Cross-source dedup (echo / speaker bleed) ----
 // On speakers the mic re-hears system audio. We render INCREMENTALLY (append
 // only, no full rebuild) with a short hold-back, deciding once per segment
 // whether it's a mic echo of the system stream — stable and smooth.
 const DUP_WINDOW = 8; // seconds: start-time gap when matching a mic↔system twin (saved view)
-const HOLDBACK_MS = 2600; // wait this long before committing a segment (twin likely arrived)
+const HOLDBACK_MS = 1200; // wait this long before committing a segment (twin likely arrived)
 interface Seg { start: number; end: number; text: string; source: string }
 let pending: (Seg & { recvAt: number })[] = [];
 let systemNorm = ""; // accumulated normalized system text, for echo matching
@@ -236,7 +249,7 @@ function pushLive(seg: Seg) {
     pruneMicEchoes(); // new system text may reveal earlier mic bubbles as echo
   }
   pending.push({ ...seg, recvAt: performance.now() });
-  if (!flushTimer) flushTimer = window.setInterval(() => flushPending(), 300);
+  if (!flushTimer) flushTimer = window.setInterval(() => flushPending(), 200);
 }
 
 function clearTranscript(placeholder?: string) {
@@ -777,8 +790,11 @@ async function chooseVault() {
   try {
     await invoke("setup_vault", { path: dir });
     if (appSettings) appSettings.vault_path = dir;
+    vaultPath = dir; // switch the in-app Notes/vault context live (no restart)
     ($("set-vault") as HTMLInputElement).value = dir;
     await refreshVaultUI();
+    banner(`Knowledge folder switched to ${dir}`, "info");
+    setTimeout(() => banner(""), 3000);
   } catch (e) {
     $("vault-status").textContent = `${e}`;
     $("vault-status").className = "hint error";
@@ -797,6 +813,7 @@ async function openSettings() {
   ($("set-frames") as HTMLInputElement).checked = s.capture_frames;
   ($("set-model") as HTMLSelectElement).value = s.claude_model || "sonnet";
   ($("set-vault") as HTMLInputElement).value = s.vault_path;
+  $("vault-choose").textContent = s.vault_path ? "Change…" : "Choose…";
   $("settings-overlay").classList.remove("hidden");
   refreshVaultUI();
 }
@@ -1020,7 +1037,15 @@ function renderPolished() {
 function attachResearchLinks(el: HTMLElement) {
   el.querySelectorAll("a").forEach((a) => {
     const href = a.getAttribute("href") || "";
-    if (href.startsWith("#wikilink:")) {
+    if (href === "#act") {
+      // A proposed quick action — clicking runs it through the Assistant.
+      const instruction = (a.textContent || "").trim();
+      a.classList.add("act");
+      a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (instruction) runAgent(instruction, instruction);
+      });
+    } else if (href.startsWith("#wikilink:")) {
       const name = decodeURIComponent(href.slice("#wikilink:".length));
       a.classList.add("kw");
       a.addEventListener("click", (ev) => {
@@ -1107,6 +1132,7 @@ async function setupEvents() {
       speakerNums.set(e.payload.speaker_id, speakerNums.size + 1);
     }
     diarLabels.push({ speakerId: e.payload.speaker_id, start: e.payload.start, end: e.payload.end });
+    reattributeSystemRows(); // backfill labels on rows shown before this label arrived
     scheduleNaming(); // dynamically name new/under-named speakers in the background
   });
   await listen<StartedEvent>("recording-started", (e) => {

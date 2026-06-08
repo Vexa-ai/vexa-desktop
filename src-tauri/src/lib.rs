@@ -292,6 +292,9 @@ document. You are given the CURRENT DOCUMENT (already condensed) and NEW RAW \
 LINES just transcribed. Return the COMPLETE updated document — a holistic file \
 edit, not an append.\n\
 Rules:\n\
+- LANGUAGE: write the ENTIRE document in the SAME LANGUAGE the speakers use in \
+  the raw lines. Never translate to English (or any other language) — if they \
+  speak Spanish/French/German/etc., the document is in that language.\n\
 - Write each turn in the SPEAKER'S OWN FIRST-PERSON VOICE (I / we), as a tight \
   paraphrase of what they actually said — as if they wrote a crisp note. NEVER \
   use third-person reporting verbs (no `discussed`, `praised`, `noted`, `asked`, \
@@ -304,10 +307,27 @@ Rules:\n\
 - Integrate the new lines, then RECONSIDER the whole document: merge adjacent \
   same-speaker turns, unify a speaker's name spelling across the doc when newer \
   context clarifies it, dedupe, and tighten. Compress hard: ~1 line per turn.\n\
+- STRUCTURE the document with a live HEADER, reconsidered fully each pass, then \
+  the turns. Use these exact heading levels:\n\
+    `## <short meeting topic>`\n\
+    `### Participants` then one line: `[[Name]], [[Name]], …` (every speaker as a link)\n\
+    `### Decisions` then a bullet list of key decisions/outcomes so far \
+    (refine/extend each pass; omit this whole section if none yet)\n\
+    `### Quick actions` then 2–4 bullets, each a useful next step written as a \
+    Markdown link `[<imperative action>](#act)` (e.g. `[Draft follow-up to Tony \
+    on benchmarking](#act)`) — plain text in the label, no [[brackets]] inside it\n\
+    `---` (divider)\n\
+  Then the chronological turns. Use `**bold**` ONLY for numbers/dates/money — \
+  never for the section labels.\n\
 - Each kept turn: `#### <Speaker> · <mm:ss>` on its own line, the first-person \
   line(s) below. Paraphrase freely for brevity; NEVER invent content or names.\n\
-- Wrap ENTITIES (people, companies, products, projects, places, orgs) in \
-  [[double brackets]]; wrap key NUMBERS / dates / money / percentages in **bold**.\n\
+- HIGHLIGHT GENEROUSLY: wrap in [[double brackets]] every substantive term worth \
+  clicking to research — named entities (people, companies, products, projects, \
+  places, orgs) AND key topics, concepts, domain terms, initiatives, documents, \
+  policies, and technical terms (e.g. [[fees and charges]], [[benchmarking]], \
+  [[inflation rate]], [[social services]], [[Appendix 3]]). Aim for a few per \
+  turn where they exist; skip only common/filler words. Wrap key NUMBERS / dates \
+  / money / percentages in **bold**.\n\
 - Output ONLY the full Markdown document. Do NOT acknowledge these instructions, \
   add a preamble, heading, or any commentary.\n";
 
@@ -327,9 +347,6 @@ fn clean_doc(s: &str) -> String {
         if let Some(idx) = t.rfind("```") {
             t = t[..idx].trim_end();
         }
-    }
-    if let Some(pos) = t.find("####") {
-        t = &t[pos..]; // drop any leading preamble before the first turn
     }
     t.trim().to_string()
 }
@@ -531,6 +548,25 @@ fn chat_send(
     let now = chrono::Utc::now().to_rfc3339();
     storage::insert_chat(&conn, &session_id, "user", &message, &now).map_err(|e| e.to_string())?;
     let resume = storage::get_claude_session(&conn, &session_id).ok().flatten();
+
+    // Make the current transcript available to the agent — it's referenced at
+    // `.vexa/transcripts/<id>.md` but is otherwise only written on Process, so a
+    // live meeting wouldn't have it. Best-effort refresh each turn.
+    if let Ok(sessions) = storage::list_sessions(&conn) {
+        if let Some(sess) = sessions.into_iter().find(|x| x.id == session_id) {
+            if let Ok(segs) = storage::get_segments(&conn, &session_id) {
+                if !segs.is_empty() {
+                    let _ = vault::write_transcript(
+                        &vault_path,
+                        &session_id,
+                        &sess.title,
+                        &sess.started_at,
+                        &segs,
+                    );
+                }
+            }
+        }
+    }
 
     let prompt = if resume.is_some() {
         message
@@ -793,18 +829,17 @@ fn name_speakers_blocking(s: Settings, items: Vec<NameItem>) -> Result<Vec<NameR
             prompt.push_str(&format!("  {}\n", t.display()));
         }
     }
-    let model = if s.claude_model.is_empty() {
-        "sonnet".to_string()
-    } else {
-        s.claude_model.clone()
-    };
+    // Pin vision naming to sonnet — reading small Zoom/Meet name labels is an
+    // OCR-heavy task that haiku (the fast text model) fails. Independent of the
+    // user's claude_model setting (which drives the fast text passes).
+    let model = "sonnet";
     log::info!(
         "[name] {} speaker(s), frames_dir={}, model={}",
         items.len(),
         frames_dir.display(),
         model
     );
-    let out = claude::run_sync(&info.path, &frames_dir, &frames_dir, &model, &prompt)
+    let out = claude::run_sync(&info.path, &frames_dir, &frames_dir, model, &prompt)
         .map_err(|e| {
             log::warn!("[name] claude vision failed: {e:#}");
             format!("{e:#}")

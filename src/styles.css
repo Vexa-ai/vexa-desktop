@@ -1,36 +1,51 @@
 :root {
-  --bg: #f3f4ee;
-  --panel: #ecede5;
-  --panel-2: #e4e6dc;
+  /* Warm-neutral palette (Claude-style) */
+  --bg: #faf9f5;
+  --panel: #f4f2ec;
+  --panel-2: #ebe8df;
   --card: #ffffff;
-  --border: #e1e2da;
-  --text: #1d1f1a;
-  --muted: #8b8f85;
-  --accent: #3a3f33;
-  --rec: #e0483f;
+  --border: #e7e3d9;
+  --text: #2a2924;
+  --muted: #918d84;
+  --accent: #2f2e29;        /* primary buttons / strong UI */
+  --accent-ink: #faf9f5;    /* text on --accent */
+  --brand: #c2603f;         /* clay brand spark (links, accents) */
+  --rec: #cf5a3f;
   /* bubbles */
-  --mic-bg: #d9eaa8;
-  --mic-text: #2a3318;
-  --sys-bg: #ededed;
-  --sys-text: #2c2c2c;
+  --mic-bg: #e0e9c8;
+  --mic-text: #3b4423;
+  --sys-bg: #efece4;
+  --sys-text: #45433c;
+  --ok: #5a9e3a;
+  /* design tokens */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --radius-sm: 8px; --radius: 10px; --radius-lg: 14px;
+  --transition: 0.18s ease;
+  --shadow: 0 1px 2px rgba(40,36,28,0.05);
+  --scrollbar: #dcd8cc;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
 }
 
 :root[data-theme="dark"] {
-  --bg: #15171c;
-  --panel: #1b1e24;
-  --panel-2: #262b35;
-  --card: #1e2128;
-  --border: #2d323d;
-  --text: #e6e8ee;
-  --muted: #9097a3;
-  --accent: #6c8cff;
-  --rec: #ff5a52;
-  --ok: #46d27f;
-  --mic-bg: #33421f;
-  --mic-text: #d7e9a8;
-  --sys-bg: #2a2f39;
-  --sys-text: #d6d9e0;
+  /* Warm dark (Claude-style), not blue-black */
+  --bg: #262521;
+  --panel: #1f1e1b;
+  --panel-2: #34322d;
+  --card: #2b2a26;
+  --border: #3a3833;
+  --text: #ece9e2;
+  --muted: #9c978c;
+  --accent: #ece9e2;        /* primary buttons go light in dark */
+  --accent-ink: #211f1c;
+  --brand: #d27a59;
+  --rec: #e0664a;
+  --ok: #6fb84a;
+  --mic-bg: #3a4423;
+  --mic-text: #dbe7b4;
+  --sys-bg: #34322d;
+  --sys-text: #d8d4cb;
+  --scrollbar: #45423b;
+  --shadow: 0 1px 2px rgba(0,0,0,0.25);
 }
 /* Darken the Milkdown editor surface in night mode. */
 :root[data-theme="dark"] .note-editor .milkdown,
@@ -44,25 +59,26 @@
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); overflow: hidden; }
 
-#app { display: flex; height: 100vh; }
+#app { display: flex; height: 100vh; position: relative; --sidebar-w: 260px; --chat-w: 440px; }
 
 /* Sidebar */
 .sidebar {
-  width: 260px;
-  min-width: 260px;
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   padding: 14px;
   gap: 12px;
+  transition: width var(--transition), min-width var(--transition);
 }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 16px; }
 .brand .brand-logo { width: 24px; height: 24px; border-radius: 6px; display: block; }
 
 .record-btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   border: none;
   border-radius: 10px;
   padding: 11px 14px;
@@ -88,16 +104,21 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 
 .session-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
 .session-item {
-  padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
-  border: 1px solid transparent;
+  position: relative;
+  padding: 9px 12px 9px 26px; border-radius: var(--radius); cursor: pointer; margin-bottom: 2px;
+}
+.session-item::before {
+  content: ""; position: absolute; left: 11px; top: 16px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: 0.4;
 }
 .session-item:hover { background: var(--panel-2); }
-.session-item.active { background: var(--card); border-color: var(--border); }
-.si-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-item.active { background: var(--panel-2); }
+.session-item.active::before { background: var(--brand); opacity: 1; }
+.si-title { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .si-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
 /* Main */
-.main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--card); }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 24px; border-bottom: 1px solid var(--border);
@@ -156,7 +177,7 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
   display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer;
   background: transparent; border: none; border-radius: 7px; padding: 8px 10px; width: 100%;
 }
-.cap-row:hover { background: rgba(108,140,255,0.12); }
+.cap-row:hover { background: rgba(194,96,63,0.12); }
 .cap-app { font-weight: 700; font-size: 12.5px; color: var(--accent); white-space: nowrap; }
 .cap-title { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cap-actions { margin-top: 4px; }
@@ -178,11 +199,11 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
   background: #fbfbf8; border: 1px solid var(--border); color: var(--text);
   border-radius: 8px; padding: 9px 11px; font-size: 14px; outline: none;
 }
-.dialog input:focus { border-color: #a9b88a; }
+.dialog input:focus { border-color: var(--accent); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 .dialog-actions button { border-radius: 8px; padding: 9px 16px; font-size: 14px; cursor: pointer; border: 1px solid var(--border); }
 .dialog-actions .ghost { background: transparent; color: var(--text); }
-.dialog-actions .primary { background: var(--accent); color: #fff; border: none; font-weight: 600; }
+.dialog-actions .primary { background: var(--accent); color: var(--accent-ink); border: none; font-weight: 600; }
 
 /* Work area: transcript + chat side by side */
 .work { flex: 1; display: flex; min-height: 0; }
@@ -211,13 +232,13 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .polished hr { border: none; border-top: 1px solid var(--border); margin: 12px 0 14px; }
 /* Quick-action pills (execute via the Assistant) */
 .polished a.act {
-  display: inline-block; background: var(--accent); color: #fff; text-decoration: none;
+  display: inline-block; background: var(--accent); color: var(--accent-ink); text-decoration: none;
   padding: 2px 9px; border-radius: 12px; font-size: 12px; font-weight: 600; cursor: pointer;
 }
 .polished li a.act { margin: 1px 0; }
 .polished a.act:hover { filter: brightness(1.08); }
 .polished h4 {
-  font-size: 11.5px; font-weight: 700; color: var(--accent);
+  font-size: 11.5px; font-weight: 700; color: var(--brand);
   margin: 9px 0 1px; padding: 0; letter-spacing: 0.01em;
 }
 .polished h4:first-child { margin-top: 2px; }
@@ -227,15 +248,16 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 }
 /* entities → clickable research chips */
 .polished a.kw {
-  background: rgba(108,140,255,0.14); color: inherit; text-decoration: none;
+  background: rgba(194,96,63,0.13); color: inherit; text-decoration: none;
   padding: 0 4px; border-radius: 4px; cursor: pointer;
 }
-.polished a.kw:hover { background: rgba(108,140,255,0.28); }
+.polished a.kw:hover { background: rgba(194,96,63,0.26); }
 /* numbers/metrics highlighted by the polish pass */
 .polished strong { font-weight: 700; color: var(--text); background: rgba(214,184,72,0.22); padding: 0 3px; border-radius: 3px; }
 .chat-col {
-  width: 440px; min-width: 360px; display: flex; flex-direction: column;
+  width: var(--chat-w); min-width: var(--chat-w); display: flex; flex-direction: column;
   border-left: 1px solid var(--border); background: var(--panel);
+  transition: width var(--transition), min-width var(--transition);
 }
 .chat-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -244,7 +266,7 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .chat-head-actions { display: flex; gap: 6px; }
 .chat-title { font-weight: 600; font-size: 13px; }
 .primary-sm {
-  background: var(--accent); color: #fff; border: none; border-radius: 8px;
+  background: var(--accent); color: var(--accent-ink); border: none; border-radius: 8px;
   padding: 7px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
 }
 .primary-sm:hover { filter: brightness(1.12); }
@@ -267,12 +289,12 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .msg.assistant code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
 .msg.assistant pre { background: var(--panel-2); padding: 10px; border-radius: 8px; overflow-x: auto; }
 .msg.assistant a { color: var(--accent); text-decoration: none; }
-.msg.assistant a.wikilink { background: rgba(108,140,255,0.12); padding: 0 4px; border-radius: 4px; }
+.msg.assistant a.wikilink { background: rgba(194,96,63,0.12); padding: 0 4px; border-radius: 4px; }
 /* Hot-action pills (real buttons parsed from the agent's ```actions block) */
 .actions-bar { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
 .msg.assistant .hot-action {
   display: inline-block; padding: 6px 12px; border: none;
-  background: var(--accent); color: #fff; border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink); border-radius: 999px;
   font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer;
   font-family: inherit; line-height: 1.2; text-align: left;
 }
@@ -291,7 +313,7 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
   flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px;
   padding: 8px 10px; font-size: 14px; font-family: inherit; background: var(--card); color: var(--text); outline: none;
 }
-.chat-input textarea:focus { border-color: #a9b88a; }
+.chat-input textarea:focus { border-color: var(--brand); }
 
 /* Settings additions */
 .sep { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
@@ -383,8 +405,80 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .markdown th, .markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .markdown a { color: var(--accent); text-decoration: none; }
 .markdown a:hover { text-decoration: underline; }
-.markdown a.wikilink { background: rgba(108,140,255,0.12); padding: 0 4px; border-radius: 4px; }
+.markdown a.wikilink { background: rgba(194,96,63,0.12); padding: 0 4px; border-radius: 4px; }
 .markdown a.wikilink.missing { color: var(--rec); background: rgba(224,72,63,0.1); }
 .markdown hr { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 
 .hidden { display: none !important; }
+
+/* ============================================================
+   Native layout: collapse, resize, responsive, chrome, polish
+   ============================================================ */
+
+/* Collapsible panels — width:0 animates (display:none can't).
+   Effective-collapsed = manual (.sidebar-collapsed) OR responsive (.auto-*). */
+#app.sidebar-collapsed .sidebar,
+#app.auto-sidebar-collapsed:not(.sidebar-open) .sidebar {
+  width: 0; min-width: 0; padding-left: 0; padding-right: 0;
+  overflow: hidden; border-right: none;
+}
+#app.chat-collapsed .chat-col,
+#app.auto-chat-collapsed:not(.chat-open) .chat-col {
+  width: 0; min-width: 0; overflow: hidden; border-left: none;
+}
+/* Disable transitions during a drag and on first paint (avoids a jump). */
+#app.resizing .sidebar, #app.resizing .chat-col,
+#app.no-anim .sidebar, #app.no-anim .chat-col { transition: none !important; }
+
+/* Splitters — thin draggable dividers on the column borders. */
+.splitter {
+  flex: 0 0 5px; cursor: col-resize; background: transparent;
+  position: relative; z-index: 5; align-self: stretch;
+}
+.splitter::before { content: ""; position: absolute; inset: 0 -3px; } /* wider grab zone */
+.splitter:hover, #app.resizing .splitter { background: var(--accent); opacity: 0.45; }
+#app.sidebar-collapsed #split-sidebar,
+#app.auto-sidebar-collapsed:not(.sidebar-open) #split-sidebar,
+#app.chat-collapsed #split-chat,
+#app.auto-chat-collapsed:not(.chat-open) #split-chat { display: none; }
+body.resizing { cursor: col-resize; user-select: none; }
+
+/* Topbar toggle buttons */
+.topbar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topbar .icon-btn { font-size: 15px; }
+
+/* Responsive: in narrow mode the sidebar floats as an overlay instead of
+   pushing the layout. Opened explicitly via .sidebar-open. */
+#app.narrow.sidebar-open .sidebar {
+  position: absolute; inset: 0 auto 0 0; z-index: 40; width: var(--sidebar-w); min-width: var(--sidebar-w);
+  box-shadow: 6px 0 28px rgba(0,0,0,0.28);
+}
+#app.narrow.sidebar-open #split-sidebar { display: none; }
+
+/* Themed thin scrollbars (Tauri macOS = WebKit) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar); border-radius: 6px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Keyboard focus rings (not on mouse clicks) */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button:focus-visible, .icon-btn:focus-visible { outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .chat-col { transition: none !important; }
+}
+
+/* Integrated macOS title bar: traffic lights float over a draggable topbar.
+   Inset only on macOS (body.mac) so Win/Linux keep the standard frame. */
+body.mac .topbar { padding-left: 80px; }
+
+/* Shortcuts cheat-sheet */
+.shortcuts-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; font-size: 13px; }
+.shortcuts-grid kbd {
+  font: 600 12px ui-monospace, monospace; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}

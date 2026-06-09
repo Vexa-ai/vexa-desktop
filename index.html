@@ -26,15 +26,21 @@
         <ul id="session-list" class="session-list"></ul>
       </aside>
 
+      <div class="splitter" id="split-sidebar"></div>
+
       <main class="main">
-        <header class="topbar">
-          <div>
-            <h1 id="session-title">No session selected</h1>
-            <div id="session-meta" class="meta"></div>
+        <header class="topbar" data-tauri-drag-region>
+          <div class="topbar-left" data-tauri-drag-region>
+            <button id="toggle-sidebar" class="icon-btn" title="Toggle sidebar (⌘B)" aria-pressed="true">☰</button>
+            <div data-tauri-drag-region>
+              <h1 id="session-title">No session selected</h1>
+              <div id="session-meta" class="meta"></div>
+            </div>
           </div>
-          <div class="status">
+          <div class="status" data-tauri-drag-region>
             <span id="rec-indicator" class="rec-indicator hidden">● REC</span>
             <span id="timer" class="timer hidden">00:00</span>
+            <button id="toggle-chat" class="icon-btn" title="Toggle assistant (⌘J)" aria-pressed="true">▦</button>
           </div>
         </header>
         <div id="status-banner" class="banner hidden"></div>
@@ -60,6 +66,8 @@
               </div>
             </div>
           </section>
+
+          <div class="splitter" id="split-chat"></div>
 
           <section class="chat-col">
             <div class="chat-head">
@@ -105,6 +113,25 @@
         </div>
         <div id="note-editor" class="note-editor hidden"></div>
       </section>
+    </div>
+
+    <!-- Keyboard shortcuts cheat-sheet -->
+    <div id="shortcuts-overlay" class="overlay hidden">
+      <div class="dialog">
+        <h2>Keyboard shortcuts</h2>
+        <div class="shortcuts-grid">
+          <kbd>⌘B</kbd><span>Toggle sidebar</span>
+          <kbd>⌘J</kbd><span>Toggle assistant panel</span>
+          <kbd>⌘N</kbd><span>Start / stop recording</span>
+          <kbd>⌘,</kbd><span>Settings</span>
+          <kbd>⌘/</kbd><span>This shortcuts sheet</span>
+          <kbd>Esc</kbd><span>Close dialog / panel</span>
+          <kbd>↵</kbd><span>Send chat (⇧↵ for newline)</span>
+        </div>
+        <div class="dialog-actions">
+          <button id="shortcuts-close" class="primary">Done</button>
+        </div>
+      </div>
     </div>
 
     <!-- Capture-target picker (shown on Start) -->

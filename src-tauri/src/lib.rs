@@ -65,6 +65,13 @@ fn is_recording(state: State<AppState>) -> bool {
     state.recorder.lock().is_some()
 }
 
+/// The in-progress recording's session id, if any. Lets the UI re-attach after a
+/// reload (the backend keeps recording even when the webview reloads).
+#[tauri::command]
+fn active_recording(state: State<AppState>) -> Option<String> {
+    state.recorder.lock().as_ref().map(|h| h.session_id.clone())
+}
+
 /// List capturable windows for the Start-recording picker.
 #[tauri::command]
 fn list_windows() -> Result<Vec<windows::WindowInfo>, String> {
@@ -375,6 +382,22 @@ fn clean_doc(s: &str) -> String {
 #[tauri::command]
 fn read_story(state: State<AppState>, session_id: String) -> Result<String, String> {
     let p = story_path(&state.audio_dir, &session_id);
+    Ok(std::fs::read_to_string(p).unwrap_or_default())
+}
+
+/// Persist this session's diarization state (labels + speaker numbering + resolved
+/// names) so attribution survives a reload / session switch — diar labels are
+/// otherwise live-only and a reopened session would show every system turn as
+/// "Others". JSON is produced/consumed by the frontend.
+#[tauri::command]
+fn save_diar(state: State<AppState>, session_id: String, data: String) -> Result<(), String> {
+    let p = state.audio_dir.join(format!("{session_id}-diar.json"));
+    std::fs::write(p, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_diar(state: State<AppState>, session_id: String) -> Result<String, String> {
+    let p = state.audio_dir.join(format!("{session_id}-diar.json"));
     Ok(std::fs::read_to_string(p).unwrap_or_default())
 }
 
@@ -940,6 +963,7 @@ pub fn run() {
             get_settings,
             save_settings,
             is_recording,
+            active_recording,
             list_windows,
             start_recording,
             stop_recording,
@@ -954,6 +978,8 @@ pub fn run() {
             story_update,
             polish_doc,
             read_story,
+            save_diar,
+            read_diar,
             chat_send,
             get_chat,
             open_in_obsidian,

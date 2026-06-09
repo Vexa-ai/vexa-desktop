@@ -88,6 +88,7 @@ let turnLog: TurnLog[] = []; // source of truth for each rendered raw turn
 let lastLog: TurnLog | null = null; // mirrors lastBubble grouping
 let polishedCount = 0; // prefix of turnLog already folded into the doc
 let polishedDoc = ""; // the living condensed markdown document (whole-doc edits)
+let meetingTitled = false; // auto-titled this recording from the story topic yet?
 let polishBusy = false;
 let polishTimer: number | undefined;
 const POLISH_INTERVAL_MS = 8000; // auto-polish cadence while recording
@@ -102,7 +103,13 @@ let crepe: Crepe | null = null; // active Milkdown rich editor
 
 // ---- DOM helpers ----
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const scrollStream = () => { const s = $("stream"); if (s) s.scrollTop = s.scrollHeight; };
+// Follow the live tail ONLY when already at the bottom — never yank the user
+// down while they're scrolled up reading earlier content.
+const scrollStream = () => {
+  const s = $("stream");
+  if (!s) return;
+  if (s.scrollHeight - s.scrollTop - s.clientHeight < 80) s.scrollTop = s.scrollHeight;
+};
 const fmtTime = (s: number) => {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
@@ -148,6 +155,17 @@ function applySpeakerNames() {
     const tag = row.querySelector(".speaker-tag");
     if (tag) tag.textContent = speakerDisplay(Number(row.dataset.speaker));
   });
+}
+// Persist diarization (labels + numbering + resolved names) so attribution
+// survives a reload / switching to another session and back.
+function saveDiar() {
+  if (!viewSessionId || !diarLabels.length) return;
+  const data = JSON.stringify({
+    labels: diarLabels,
+    nums: [...speakerNums.entries()],
+    names: [...speakerNames.entries()],
+  });
+  invoke("save_diar", { sessionId: viewSessionId, data }).catch(() => {});
 }
 // Backfill speaker labels on already-rendered system rows as diarization commits
 // catch up (lets us show segments fast without waiting for their diar label).
@@ -468,6 +486,7 @@ async function nameOne(sid: string) {
       speakerNames.set(num, r.name);
       st.named = true;
       applySpeakerNames();
+      saveDiar(); // persist the resolved name immediately
       banner(`Identified ${label} → ${r.name}.`, "info");
       setTimeout(() => banner(""), 2500);
     } else {
@@ -527,6 +546,23 @@ async function selectSession(s: SessionRow) {
   const raw = await invoke<SegmentRow[]>("get_session_segments", { id: s.id });
   const segs = dedupeLoaded(raw);
   clearTranscript(segs.length ? undefined : "No transcript for this session yet.");
+  // Restore saved diarization so past sessions keep their speaker attribution
+  // (else every system turn renders as "Others"). Must precede rendering.
+  try {
+    const dj = await invoke<string>("read_diar", { sessionId: s.id });
+    if (dj) {
+      const d = JSON.parse(dj) as {
+        labels?: { speakerId: string; start: number; end: number }[];
+        nums?: [string, number][];
+        names?: [number, string][];
+      };
+      diarLabels = d.labels ?? [];
+      speakerNums.clear();
+      for (const [k, v] of d.nums ?? []) speakerNums.set(k, v);
+      speakerNames.clear();
+      for (const [k, v] of d.names ?? []) speakerNames.set(Number(k), v);
+    }
+  } catch { /* none saved */ }
   for (const seg of segs) appendSegment(seg);
   setChatStatus("");
   await loadChat(s.id);
@@ -606,6 +642,30 @@ async function startRecording() {
   }
 }
 
+// Re-attach to a recording already running in the backend (e.g. after a webview
+// reload) so the Stop button + live UI come back instead of reverting to Start.
+async function restoreRecording() {
+  let id: string | null = null;
+  try {
+    id = await invoke<string | null>("active_recording");
+  } catch {
+    /* not recording */
+  }
+  if (!id) return;
+  const sessions = await invoke<SessionRow[]>("list_sessions");
+  const sess = sessions.find((s) => s.id === id);
+  if (!sess) return;
+  await selectSession(sess); // render its transcript/story so far
+  recording = true;
+  setRecordingUI(true);
+  startTimer();
+  timerStart = Date.parse(sess.started_at) || Date.now(); // count from the real start
+  startPolishAuto();
+  $("session-title").textContent = "Recording…";
+  banner("Reattached to the recording in progress.", "info");
+  setTimeout(() => banner(""), 2500);
+}
+
 async function stopRecording() {
   try {
     await invoke<number>("stop_recording");
@@ -618,6 +678,7 @@ async function stopRecording() {
   stopPolishAuto();
   flushPending(true); // commit any held-back segments immediately
   setTimeout(() => polishTick(true), 400); // final pass: polish everything remaining
+  saveDiar(); // persist final speaker attribution + names
   await refreshSessions();
 }
 
@@ -1085,9 +1146,21 @@ function resetPolish() {
   lastLog = null;
   polishedCount = 0;
   polishedDoc = "";
+  meetingTitled = false;
   polishBusy = false;
   const pol = document.getElementById("polished");
   if (pol) pol.innerHTML = "";
+}
+// As soon as the story assigns a meeting topic (`## …`), propagate it to the
+// session title + sidebar (once per recording; doesn't clobber later edits).
+function maybeTitleFromStory() {
+  if (!recording || meetingTitled || !viewSessionId) return;
+  const topic = polishedDoc.match(/^##\s+(.+?)\s*$/m)?.[1]?.trim();
+  if (!topic) return;
+  meetingTitled = true;
+  invoke("rename_session", { id: viewSessionId, title: topic }).catch(() => {});
+  $("session-title").textContent = topic;
+  void refreshSessions();
 }
 // Re-render the whole living document (it is reconsidered holistically each pass).
 function renderPolished() {
@@ -1157,6 +1230,7 @@ async function polishTick(flush = false) {
     if (md && (md.includes("####") || !polishedDoc)) {
       polishedDoc = md;
       renderPolished();
+      maybeTitleFromStory(); // surface the meeting name to the sidebar ASAP
       for (const e of batch) e.el.remove(); // drop the raw rows now folded in
       polishedCount = upto;
       const empty = $("transcript").querySelector(".empty");
@@ -1174,7 +1248,10 @@ async function polishTick(flush = false) {
 }
 function startPolishAuto() {
   stopPolishAuto();
-  polishTimer = window.setInterval(() => polishTick(), POLISH_INTERVAL_MS);
+  polishTimer = window.setInterval(() => {
+    polishTick();
+    saveDiar(); // keep diarization persisted during the recording
+  }, POLISH_INTERVAL_MS);
 }
 function stopPolishAuto() {
   if (polishTimer) {
@@ -1273,10 +1350,160 @@ function initTheme() {
   applyTheme(localStorage.getItem("theme") === "dark");
 }
 
+// ---- Layout: collapsible + resizable panels, responsive, shortcuts ----
+const appEl = () => document.getElementById("app") as HTMLElement;
+
+function isSidebarVisible(): boolean {
+  const a = appEl();
+  if (a.classList.contains("narrow")) return a.classList.contains("sidebar-open");
+  return !a.classList.contains("sidebar-collapsed");
+}
+function setSidebar(open: boolean) {
+  const a = appEl();
+  if (a.classList.contains("narrow")) {
+    a.classList.toggle("sidebar-open", open); // overlay in narrow mode
+  } else {
+    a.classList.toggle("sidebar-collapsed", !open);
+    localStorage.setItem("layout.sidebar", open ? "open" : "collapsed");
+  }
+  $("toggle-sidebar").setAttribute("aria-pressed", String(open));
+}
+function toggleSidebar() { setSidebar(!isSidebarVisible()); }
+
+function isChatVisible(): boolean {
+  const a = appEl();
+  if (a.classList.contains("auto-chat-collapsed")) return a.classList.contains("chat-open");
+  return !a.classList.contains("chat-collapsed");
+}
+function setChat(open: boolean) {
+  const a = appEl();
+  if (a.classList.contains("auto-chat-collapsed")) {
+    a.classList.toggle("chat-open", open);
+  } else {
+    a.classList.toggle("chat-collapsed", !open);
+    localStorage.setItem("layout.chat", open ? "open" : "collapsed");
+  }
+  $("toggle-chat").setAttribute("aria-pressed", String(open));
+}
+function toggleChat() { setChat(!isChatVisible()); }
+
+function syncToggleStates() {
+  $("toggle-sidebar").setAttribute("aria-pressed", String(isSidebarVisible()));
+  $("toggle-chat").setAttribute("aria-pressed", String(isChatVisible()));
+}
+
+// Draggable divider that drives a CSS width variable on #app, persisted.
+interface SplitOpts {
+  handle: HTMLElement; cssVar: string; storeKey: string;
+  min: number; max: () => number; def: number; edge: "left" | "right";
+}
+function makeSplitter(o: SplitOpts) {
+  const a = appEl();
+  const cur = () => parseInt(getComputedStyle(a).getPropertyValue(o.cssVar)) || o.def;
+  let startX = 0, startW = 0;
+  const move = (e: PointerEvent) => {
+    const dx = e.clientX - startX;
+    let w = o.edge === "left" ? startW + dx : startW - dx;
+    w = Math.max(o.min, Math.min(o.max(), w));
+    a.style.setProperty(o.cssVar, w + "px");
+  };
+  const up = () => {
+    o.handle.removeEventListener("pointermove", move);
+    a.classList.remove("resizing");
+    document.body.classList.remove("resizing");
+    localStorage.setItem(o.storeKey, String(cur()));
+  };
+  o.handle.addEventListener("pointerdown", (e: PointerEvent) => {
+    e.preventDefault();
+    startX = e.clientX; startW = cur();
+    a.classList.add("resizing"); document.body.classList.add("resizing");
+    o.handle.setPointerCapture(e.pointerId);
+    o.handle.addEventListener("pointermove", move);
+    o.handle.addEventListener("pointerup", up, { once: true });
+  });
+  o.handle.addEventListener("dblclick", () => {
+    a.style.setProperty(o.cssVar, o.def + "px");
+    localStorage.setItem(o.storeKey, String(o.def));
+  });
+}
+
+function initLayout() {
+  const a = appEl();
+  a.classList.add("no-anim"); // avoid a first-paint jump
+  a.style.setProperty("--sidebar-w", (parseInt(localStorage.getItem("layout.sidebarW") || "260")) + "px");
+  a.style.setProperty("--chat-w", (parseInt(localStorage.getItem("layout.chatW") || "440")) + "px");
+  if (localStorage.getItem("layout.sidebar") === "collapsed") a.classList.add("sidebar-collapsed");
+  if (localStorage.getItem("layout.chat") === "collapsed") a.classList.add("chat-collapsed");
+  makeSplitter({ handle: $("split-sidebar"), cssVar: "--sidebar-w", storeKey: "layout.sidebarW",
+    min: 200, max: () => Math.min(420, innerWidth * 0.4), def: 260, edge: "left" });
+  makeSplitter({ handle: $("split-chat"), cssVar: "--chat-w", storeKey: "layout.chatW",
+    min: 320, max: () => Math.min(640, innerWidth * 0.5), def: 440, edge: "right" });
+  syncToggleStates();
+  requestAnimationFrame(() => requestAnimationFrame(() => a.classList.remove("no-anim")));
+}
+
+// Responsive: container-width breakpoints (the transcript's room depends on
+// collapse/resize state, so observe #app, not the viewport).
+function initResponsive() {
+  const a = appEl();
+  const ro = new ResizeObserver(([e]) => {
+    const w = e.contentRect.width;
+    const compact = w < 1100, narrow = w < 820;
+    a.classList.toggle("compact", compact);
+    a.classList.toggle("narrow", narrow);
+    a.classList.toggle("auto-chat-collapsed", compact);
+    a.classList.toggle("auto-sidebar-collapsed", narrow);
+    if (!compact) a.classList.remove("chat-open");
+    if (!narrow) a.classList.remove("sidebar-open");
+    syncToggleStates();
+  });
+  ro.observe(a);
+}
+
+// ---- Keyboard shortcuts + overlay manager ----
+let lastFocus: HTMLElement | null = null;
+function captureFocus() { lastFocus = document.activeElement as HTMLElement; }
+function restoreFocus() { lastFocus?.focus?.(); lastFocus = null; }
+function openShortcuts() { captureFocus(); $("shortcuts-overlay").classList.remove("hidden"); }
+function closeShortcuts() { $("shortcuts-overlay").classList.add("hidden"); restoreFocus(); }
+// Close only the frontmost overlay / panel.
+function closeTopOverlay() {
+  if (!$("shortcuts-overlay").classList.contains("hidden")) return closeShortcuts();
+  if (!$("settings-overlay").classList.contains("hidden")) { closeSettings(); return restoreFocus(); }
+  if (!$("capture-overlay").classList.contains("hidden")) { $("capture-cancel").click(); return; }
+  if (!$("vault-view").classList.contains("hidden")) {
+    if (editing) return; // don't interrupt a note edit
+    void closeVault(); return restoreFocus();
+  }
+  const a = appEl();
+  if (a.classList.contains("narrow") && a.classList.contains("sidebar-open")) setSidebar(false);
+}
+function installShortcuts() {
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeTopOverlay(); return; }
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta) return;
+    const k = e.key.toLowerCase();
+    if (k === "b") { e.preventDefault(); toggleSidebar(); }
+    else if (k === "j") { e.preventDefault(); toggleChat(); }
+    else if (e.key === ",") { e.preventDefault(); captureFocus(); void openSettings(); }
+    else if (k === "n") { e.preventDefault(); void toggleRecording(); }
+    else if (e.key === "/") { e.preventDefault(); openShortcuts(); }
+  });
+  // Backdrop click closes dimmed overlays (not the full-screen vault view).
+  $("settings-overlay").addEventListener("click", (e) => { if (e.target === e.currentTarget) closeSettings(); });
+  $("shortcuts-overlay").addEventListener("click", (e) => { if (e.target === e.currentTarget) closeShortcuts(); });
+  $("capture-overlay").addEventListener("click", (e) => { if (e.target === e.currentTarget) $("capture-cancel").click(); });
+}
+
 function wireUI() {
   $("new-recording").onclick = toggleRecording;
-  $("settings-btn").onclick = openSettings;
+  $("settings-btn").onclick = () => { captureFocus(); openSettings(); };
   $("theme-btn").onclick = toggleTheme;
+  $("toggle-sidebar").onclick = toggleSidebar;
+  $("toggle-chat").onclick = toggleChat;
+  $("shortcuts-close").onclick = closeShortcuts;
+  installShortcuts();
   $("settings-cancel").onclick = closeSettings;
   $("settings-save").onclick = saveSettings;
   $("update-btn").onclick = updateMeeting;
@@ -1302,10 +1529,14 @@ function wireUI() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  if (navigator.userAgent.includes("Mac")) document.body.classList.add("mac");
   initTheme();
+  initLayout();
+  initResponsive();
   wireUI();
   await setupEvents();
   await refreshSessions();
+  await restoreRecording(); // re-attach if a recording is still running in the backend
   const s = await invoke<Settings>("get_settings");
   if (!s.api_token) {
     banner("Set your transcription endpoint & token in ⚙ Settings to enable transcription.", "info");

@@ -69,6 +69,16 @@ pub fn spawn(
             let mut buffer: Vec<f32> = Vec::with_capacity(MAX_CHUNK);
             let mut cursor: u64 = 0; // global index of buffer[0]
 
+            // Auto-gain the MIC only: many mics record well below system-audio
+            // level, so the fixed silence/drop thresholds fragment or drop the
+            // user's words. We track a slow running speech level and boost toward
+            // a target so the thresholds (and Whisper) see a healthy signal.
+            // System audio is already at level — left untouched.
+            let agc = matches!(source, Source::Mic);
+            let mut agc_level: f32 = 0.0; // EMA of voiced RMS
+            const AGC_TARGET: f32 = 0.06;
+            const AGC_MAX_GAIN: f32 = 12.0;
+
             let emit = |buffer: &mut Vec<f32>, end: usize, cursor: &mut u64| {
                 let chunk: Vec<f32> = buffer.drain(0..end).collect();
                 let start_secs = *cursor as f64 / SR as f64;
@@ -82,7 +92,24 @@ pub fn spawn(
                 }
             };
 
-            for block in mixed_rx.iter() {
+            for mut block in mixed_rx.iter() {
+                // Mic auto-gain: adapt the level estimate on voiced frames only
+                // (so silence doesn't blow up the gain), then apply a clamped
+                // boost in-place before anything downstream sees the samples.
+                if agc {
+                    let r = rms(&block);
+                    if r > 0.003 {
+                        agc_level = if agc_level <= 0.0 { r } else { 0.9 * agc_level + 0.1 * r };
+                    }
+                    if agc_level > 1e-4 {
+                        let gain = (AGC_TARGET / agc_level).clamp(1.0, AGC_MAX_GAIN);
+                        if gain > 1.01 {
+                            for s in block.iter_mut() {
+                                *s = (*s * gain).clamp(-1.0, 1.0);
+                            }
+                        }
+                    }
+                }
                 // Persist every sample to the recording.
                 for &s in &block {
                     let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
